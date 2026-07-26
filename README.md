@@ -104,12 +104,12 @@ container, not by your local shell.
   seed_file, seed_peak_name, n_peaks_merged`. `seed_tier` is `0` if the
   window came from a scored peak, `1` if it came from a coordinate-only
   peak.
-- `results/mapping/<original_file>.mapped.bed` — one per input file: every
-  original peak plus the unified peak it was assigned to
-  (`unified_id, unified_chrom, unified_start, unified_end`), along with its
-  own `tier` and `width`.
+- `results/mapping/<original_file>.mapped.bed` — one per input file, one row
+  per original peak in its original order. Headerless BED4: `chrom, start,
+  end, unified_id` — the coordinates of the unified peak that original peak
+  maps to (its own original coordinates/score/etc. are not included).
 - `results/mapping/all_peaks_mapped.tsv` — same mapping for all input files
-  combined, with a `file_name` column.
+  combined: `file_name, chrom, start, end, unified_id`.
 
 ## Notes
 

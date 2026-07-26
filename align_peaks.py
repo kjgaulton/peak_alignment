@@ -43,10 +43,14 @@ window in places no scored peak's original interval touches. Within tier
 
 Output
 ------
-- <outdir>/unified_peaks.bed        Final non-overlapping 300bp consensus peaks.
-- <outdir>/mapping/<file>.mapped.bed  Per input file: every original peak with
-  the unified peak it was assigned to appended as extra columns.
-- <outdir>/mapping/all_peaks_mapped.tsv  Same mapping, all files combined.
+- <outdir>/unified_peaks.bed        Final non-overlapping 300bp consensus peaks
+  (with seed/provenance columns).
+- <outdir>/mapping/<file>.mapped.bed  Per input file, one row per original
+  peak in its original order: a headerless BED4 of chrom, start, end,
+  unified_id -- the coordinates of the unified peak that original peak was
+  collapsed into (original peak's own coordinates/score/etc. are dropped).
+- <outdir>/mapping/all_peaks_mapped.tsv  Same mapping for all input files
+  combined, with a file_name column added.
 
 Usage
 -----
@@ -263,20 +267,25 @@ def write_outputs(peaks_df, unified_df, mapping, outdir):
     )
     peaks_df = peaks_df.join(unified_lookup, on="unified_id")
 
-    out_cols = [
-        "chrom", "start", "end", "name", "score", "strand",
-        "signalValue", "pValue", "qValue", "summit_offset", "summit",
-        "tier", "width",
-        "unified_id", "unified_chrom", "unified_start", "unified_end",
-    ]
+    # Per-original-peak mapping output: just the unified peak's own
+    # coordinates plus its ID (BED4: chrom, start, end, name=unified_id).
+    # One row per original input peak, in its original file order, with the
+    # original peak's coordinates replaced by the unified window it maps to.
+    bed4 = peaks_df[
+        ["file_name", "orig_line_index", "unified_chrom", "unified_start", "unified_end", "unified_id"]
+    ].rename(columns={
+        "unified_chrom": "chrom", "unified_start": "start", "unified_end": "end",
+    })
 
     combined_path = os.path.join(mapping_dir, "all_peaks_mapped.tsv")
-    peaks_df[["file_name"] + out_cols].to_csv(combined_path, sep="\t", index=False)
+    bed4.sort_values(["file_name", "orig_line_index"])[
+        ["file_name", "chrom", "start", "end", "unified_id"]
+    ].to_csv(combined_path, sep="\t", header=True, index=False)
 
-    for fname, sub in peaks_df.groupby("file_name"):
+    for fname, sub in bed4.groupby("file_name"):
         out_path = os.path.join(mapping_dir, f"{os.path.splitext(fname)[0]}.mapped.bed")
-        sub[out_cols].sort_values(["chrom", "start"]).to_csv(
-            out_path, sep="\t", header=True, index=False
+        sub.sort_values("orig_line_index")[["chrom", "start", "end", "unified_id"]].to_csv(
+            out_path, sep="\t", header=False, index=False
         )
 
     return unified_path, combined_path
