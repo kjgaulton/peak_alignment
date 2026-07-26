@@ -64,6 +64,7 @@ Usage
         --window 300 --genome hg38
 """
 import argparse
+import fnmatch
 import glob
 import os
 import sys
@@ -307,6 +308,15 @@ def main():
             "the tier."
         ),
     )
+    parser.add_argument(
+        "--exclude", nargs="+", default=[],
+        help=(
+            "File basenames or glob patterns to drop from --input/"
+            "--coord-input before pooling (e.g. flagged low-quality files "
+            "from qc_peaks.py's flagged_files.txt). Matched against the "
+            "basename of each resolved input file."
+        ),
+    )
     parser.add_argument("--outdir", required=True, help="Output directory")
     parser.add_argument(
         "--window", type=int, default=300,
@@ -325,13 +335,31 @@ def main():
             files.extend(matches if matches else [pattern])
         return [f for f in files if os.path.isfile(f)]
 
+    exclude_names = set()
+    for pattern in args.exclude:
+        exclude_names.add(os.path.basename(pattern))
+
+    def apply_exclude(files):
+        kept = []
+        for f in files:
+            base = os.path.basename(f)
+            if any(fnmatch.fnmatch(base, pat) or base == pat for pat in exclude_names):
+                print(f"Excluding {base} (matched --exclude)")
+                continue
+            kept.append(f)
+        return kept
+
     input_files = resolve(args.input)
+    if args.exclude:
+        input_files = apply_exclude(input_files)
     if not input_files:
-        sys.exit("No input files found for --input.")
+        sys.exit("No input files found for --input (after applying --exclude).")
 
     coord_files = resolve(args.coord_input) if args.coord_input else []
+    if args.exclude and coord_files:
+        coord_files = apply_exclude(coord_files)
     if args.coord_input and not coord_files:
-        sys.exit("No input files found for --coord-input.")
+        sys.exit("No input files found for --coord-input (after applying --exclude).")
 
     print(f"Loading {len(input_files)} scored peak file(s)...")
     if coord_files:

@@ -89,9 +89,26 @@ docker run --rm \
 Quote the `--input`/`--coord-input` globs so they're expanded inside the
 container, not by your local shell.
 
+The image's entrypoint is `align_peaks.py`; to run `qc_peaks.py` instead,
+override the entrypoint (same `--user`/volume conventions apply):
+
+```bash
+docker run --rm \
+    --user $(id -u):$(id -g) \
+    --entrypoint python3 \
+    -v /path/to/output:/results \
+    peak-alignment \
+    qc_peaks.py \
+    --mapping-tsv /results/mapping/all_peaks_mapped.tsv \
+    --outdir /results/qc \
+    --flag-below 50
+```
+
 - `--input`: one or more narrowPeak files or glob patterns (tier 0, scored).
 - `--coord-input`: optional coordinate-only BED files or glob patterns
   (tier 1, lower priority — see Algorithm above).
+- `--exclude`: file basenames or glob patterns to drop from `--input`/
+  `--coord-input` before pooling — see the QC workflow below.
 - `--outdir`: output directory (created if missing).
 - `--window`: fixed window width in bp (default 300).
 - `--genome`: `hg38`, `hg19`, or `mm10` — used only to clip windows at
@@ -125,3 +142,56 @@ container, not by your local shell.
   peak's original interval touches.
 - Chromosome sizes for clipping live in `chrom_sizes.py`; add a build there
   if you need one beyond hg38/hg19/mm10.
+
+## Quality metrics per input file (qc_peaks.py)
+
+Once you've run `align_peaks.py`, `qc_peaks.py` scores each original input
+file by how reproducible its peaks are, using the mapping it already
+produced (no need to recompute overlaps):
+
+```bash
+python3 qc_peaks.py \
+    --mapping-tsv results/mapping/all_peaks_mapped.tsv \
+    --outdir results/qc \
+    --flag-below 50
+```
+
+For every original peak, we already know which unified window it landed
+in and, from that, which *other* input files also contributed a peak to
+that same window. That gives two per-file metrics:
+
+- **pct_overlap_other_file** — percent of a file's peaks whose unified
+  window also contains a peak from at least one other file. A file
+  scoring low here is contributing peaks nobody else supports, which is a
+  reasonable proxy for a poor-quality replicate.
+- **the distribution of "how many other files back up each peak"** — for
+  a given file, how many of its peaks are supported by 0 other files, how
+  many by 1, by 2, and so on (`file_overlap_distribution.tsv`).
+
+Output:
+
+- `results/qc/file_quality_summary.tsv` — one row per file: `file_name,
+  n_peaks, n_unified_peaks, n_supported_by_other, pct_overlap_other_file,
+  mean_other_files, median_other_files, max_other_files`. Sorted worst
+  (lowest `pct_overlap_other_file`) first.
+- `results/qc/file_overlap_distribution.tsv` — long format: `file_name,
+  n_other_files, n_peaks, pct_of_file_peaks`.
+- `results/qc/flagged_files.txt` — only written if `--flag-below` is
+  given: one file_name per line, for files under that percentage.
+
+### Regenerating the unified set without low-quality files
+
+Review the summary table (and decide on a threshold — `--flag-below` is
+just a suggestion, not an automatic cutoff), then rerun `align_peaks.py`
+excluding the files you don't want:
+
+```bash
+python3 align_peaks.py \
+    --input peaks/*.narrowPeak \
+    --exclude $(cat results/qc/flagged_files.txt) \
+    --outdir results_v2 \
+    --window 300 --genome hg38
+```
+
+`--exclude` also accepts glob patterns and works the same way for
+`--coord-input`.
