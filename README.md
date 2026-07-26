@@ -67,10 +67,16 @@ docker build -t peak-alignment .
 ```
 
 Run it, mounting your peaks directory to `/data` and an output directory to
-`/results`:
+`/results`. Create the output directory first and run as your own
+user/group with `--user` — otherwise, if `/results` is on an NFS mount
+(common on HPC/lab filesystems), root-squash will make writes from the
+container's root user fail with a `PermissionError`:
 
 ```bash
+mkdir -p /path/to/output
+
 docker run --rm \
+    --user $(id -u):$(id -g) \
     -v /path/to/peaks:/data \
     -v /path/to/output:/results \
     peak-alignment \
