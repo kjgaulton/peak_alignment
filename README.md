@@ -14,23 +14,37 @@ Peaks come in two priority tiers:
   (see `--coord-input` below), ranked by peak width, used only as a
   fallback when a real signal isn't available.
 
-1. Pool every peak from every input file (both tiers) together.
+1. Pool every peak from every input file (both tiers) together. For each
+   peak, precompute the fixed-width window (default 300bp) it would get if
+   chosen as a seed: centered on its own summit (narrowPeak: `chromStart` +
+   summit offset, column 10; coordinate-only: interval midpoint), clipped
+   to chromosome boundaries.
 2. Process peaks in priority order — every tier 0 peak (strongest signal
    first) before any tier 1 peak (widest first). While peaks remain:
-   - Take the next unconsumed peak in that order as the seed.
-   - Build a fixed-width window (default 300bp) centered on the seed's
-     summit (narrowPeak: `chromStart` + summit offset, column 10;
-     coordinate-only: interval midpoint), clipped to chromosome boundaries.
-   - Remove the seed and every other pooled peak whose original interval
-     overlaps it, regardless of tier. All of them are mapped to the new
-     unified window.
-3. Repeat until no peaks remain. The windows created in step 2 are the
+   - Take the next unconsumed peak in that order as the seed; its
+     precomputed window is the unified window.
+   - Remove the seed and every other pooled peak whose own precomputed
+     window overlaps the seed's window, regardless of tier. All of them
+     are mapped to the new unified window.
+3. Repeat until no peaks remain. The windows chosen in step 2 are the
    unified peak set, and by construction no two of them overlap.
 
-Because tier 0 is always processed first, a coordinate-only peak that
-overlaps any scored peak gets absorbed into that scored peak's window and
-never gets a turn to seed its own — it only seeds a new unified window in
-places no scored peak occupies.
+Clustering is judged on each peak's own fixed-width summit window, not its
+raw `chromStart`/`chromEnd` — that's what actually guarantees the final
+set is non-overlapping (two raw peaks that don't touch can still have
+summits close enough that their windows would overlap). It's also how
+multi-summit peaks are handled: if a caller like MACS2 `--call-summits`
+reports several summits sharing one broad raw span, each summit is just
+another peak in the pool, and two of them only collapse into the same
+unified peak if their own 300bp windows actually overlap. Summits far
+enough apart within the same broad call can each seed their own separate
+unified peak; summits close together still collapse to whichever has the
+strongest signal, exactly like any other overlap.
+
+Because tier 0 is always processed first, a coordinate-only peak whose
+window overlaps a scored peak's window gets absorbed into that scored
+peak's window and never gets a turn to seed its own — it only seeds a new
+unified window in places no scored peak's window touches.
 
 ## Quality control and auto-exclusion
 

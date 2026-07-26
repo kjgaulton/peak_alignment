@@ -15,31 +15,43 @@ Peaks come in two tiers:
     ranked by peak width (wider first), used only as a fallback signal in
     the absence of anything better.
 
-1. Pool all peaks from all input files (both tiers) together.
+1. Pool all peaks from all input files (both tiers) together. For every
+   peak, precompute the fixed-width window (default 300bp) it WOULD get if
+   chosen as a seed: centered on its own summit (narrowPeak: chromStart +
+   summit offset; coordinate-only: interval midpoint), clipped to
+   chromosome boundaries.
 2. Process peaks in priority order -- every tier 0 peak (by descending
    signalValue) before any tier 1 peak (by descending width). Repeat until
    the pool is empty:
      a. Take the next peak in that order that hasn't already been consumed
-        -- this is the "seed" peak.
-     b. Build a fixed-width window (default 300bp) centered on the seed
-        peak's summit (narrowPeak: chromStart + summit offset; coordinate-
-        only: interval midpoint). Clip the window to chromosome boundaries.
-     c. Find every other peak still in the pool whose ORIGINAL interval
-        overlaps the seed peak's ORIGINAL interval, regardless of tier.
-        Remove the seed peak and all of these overlapping peaks from the
-        pool. Record that each of them (seed included) maps to the new
-        unified window.
-     d. Continue with whatever peaks remain in the pool (they did not
-        overlap the seed peak).
-3. The set of fixed-width windows created in step (b) across all
+        -- this is the "seed" peak. Its precomputed window is the unified
+        window.
+     b. Find every other peak still in the pool whose OWN precomputed
+        window overlaps the seed's window, regardless of tier. Remove the
+        seed and all of these from the pool. Record that each of them
+        (seed included) maps to the new unified window.
+     c. Continue with whatever peaks remain in the pool (their windows did
+        not overlap the seed's window).
+3. The set of fixed-width windows chosen in step (a) across all
    iterations is the unified peak set.
 
+Clustering is judged on each peak's own fixed-width summit window, not its
+raw chromStart/chromEnd -- this is what actually guarantees the final
+unified set is non-overlapping, and it's also how multi-summit peaks are
+handled: if a peak caller (e.g. MACS2 --call-summits) reports several
+summits sharing one broad raw span, each summit is just another peak in
+the pool, and two of them only collapse into the same unified peak if
+their own 300bp windows would actually overlap -- summits far enough apart
+within the same broad call can each seed their own separate unified peak,
+while summits close enough together still collapse to whichever has the
+strongest signal, exactly like any other overlap.
+
 Because tier 0 peaks are always processed before tier 1 peaks, any
-coordinate-only peak that overlaps a scored peak gets absorbed into that
-scored peak's window during tier 0 processing and never gets a turn to
-seed its own window. A coordinate-only peak only seeds a new unified
-window in places no scored peak's original interval touches. Within tier
-1, wider peaks get priority over narrower ones under the same rule.
+coordinate-only peak whose window overlaps a scored peak's window gets
+absorbed into that scored peak's window during tier 0 processing and
+never gets a turn to seed its own. A coordinate-only peak only seeds a new
+unified window in places no scored peak's window touches. Within tier 1,
+wider peaks get priority over narrower ones under the same rule.
 
 Quality control and auto-exclusion
 -----------------------------------
@@ -182,34 +194,55 @@ def build_peak_pool(scored_files, coord_only_files):
     return combined
 
 
+def compute_windows(peaks_df, window, genome_sizes):
+    """Adds window_start/window_end: the fixed-width window each peak would
+    get if IT were chosen as a seed, centered on its own summit and clipped
+    to chromosome boundaries. Clustering is decided from these windows, not
+    from the raw chromStart/chromEnd -- see run_iterative_selection."""
+    half = window // 2
+    peaks_df = peaks_df.copy()
+
+    starts = (peaks_df["summit"] - half).clip(lower=0)
+    ends = peaks_df["summit"] + half
+
+    chrom_len = peaks_df["chrom"].map(genome_sizes)
+    unknown = chrom_len.isna()
+    ends = ends.where(unknown | (ends <= chrom_len), chrom_len)
+    starts = starts.where(unknown | (starts <= chrom_len), chrom_len)
+
+    peaks_df["window_start"] = starts.astype("int64")
+    peaks_df["window_end"] = ends.astype("int64")
+    return peaks_df
+
+
 def build_chrom_trees(peaks_df):
     trees = {}
     for chrom, sub in peaks_df.groupby("chrom"):
         tree = IntervalTree()
         for row in sub.itertuples():
-            if row.end > row.start:
-                tree[row.start:row.end] = row.global_id
+            if row.window_end > row.window_start:
+                tree[row.window_start:row.window_end] = row.global_id
         trees[chrom] = tree
     return trees
 
 
-def clip_window(chrom, center, half_width, genome_sizes):
-    start = center - half_width
-    end = center + half_width
-    chrom_len = genome_sizes.get(chrom)
-    if start < 0:
-        start = 0
-    if chrom_len is not None and end > chrom_len:
-        end = chrom_len
-    if chrom_len is not None and start > chrom_len:
-        start = chrom_len
-    return start, end
-
-
 def run_iterative_selection(peaks_df, window, genome_sizes):
     """Returns (unified_peaks_df, mapping_series) where mapping_series maps
-    global_id -> unified_peak_id."""
-    half = window // 2
+    global_id -> unified_peak_id.
+
+    Clustering ("do these peaks overlap") is judged on each peak's fixed-
+    width summit window, not its raw chromStart/chromEnd. This matters for
+    peaks with multiple summits (e.g. MACS2 --call-summits): sub-peaks
+    sharing one broad raw span but with summits far enough apart that
+    their own 300bp windows wouldn't overlap are allowed to seed separate
+    unified peaks, instead of automatically collapsing to whichever
+    summit has the strongest signal. It's also what actually guarantees
+    the final unified set is non-overlapping -- two raw peaks that don't
+    overlap each other can still have summits close enough that their
+    fixed-width windows would, and window-based clustering catches that
+    case where raw-span-based clustering would not.
+    """
+    peaks_df = compute_windows(peaks_df, window, genome_sizes)
     trees = build_chrom_trees(peaks_df)
     by_id = peaks_df.set_index("global_id")
 
@@ -231,18 +264,18 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
         chrom = seed["chrom"]
         tree = trees[chrom]
 
-        # Find every still-active peak whose ORIGINAL interval overlaps the
-        # seed peak's ORIGINAL interval (this always includes the seed
-        # itself, since the seed's own interval is still in the tree).
-        hits = list(tree.overlap(seed["start"], seed["end"]))
+        # Find every still-active peak whose fixed-width summit window
+        # overlaps the seed's own summit window (this always includes the
+        # seed itself, since its window is still in the tree).
+        hits = list(tree.overlap(seed["window_start"], seed["window_end"]))
         if not hits:
-            # Seed's own interval was zero-length or otherwise missing from
+            # Seed's own window was zero-length or otherwise missing from
             # the tree; fall back to treating it as a singleton cluster.
             overlapping_ids = [gid]
         else:
             overlapping_ids = [iv.data for iv in hits]
 
-        start, end = clip_window(chrom, int(seed["summit"]), half, genome_sizes)
+        start, end = int(seed["window_start"]), int(seed["window_end"])
         uid = f"unified_peak_{unified_id}"
         unified_id += 1
         unified_rows.append({
