@@ -1,8 +1,9 @@
 # Peak Alignment Pipeline
 
 Builds a single unified, non-overlapping peak set across multiple MACS2
-`narrowPeak` files, and maps every original peak back to the unified peak
-it was collapsed into.
+`narrowPeak` files, maps every original peak back to the unified peak it
+was collapsed into, and scores each input file's quality so low-quality
+files can be automatically excluded from the final set.
 
 ## Algorithm
 
@@ -31,6 +32,26 @@ overlaps any scored peak gets absorbed into that scored peak's window and
 never gets a turn to seed its own — it only seeds a new unified window in
 places no scored peak occupies.
 
+## Quality control and auto-exclusion
+
+After that first alignment pass, every original peak is mapped to a
+unified window, which tells us which *other* input files also placed a
+peak in that same window — a direct measure of reproducibility.
+`align_peaks.py` scores every input file on that basis by default and
+re-runs the alignment excluding any file that falls below either
+threshold:
+
+- **pct_overlap_other_file** (`--min-pct-overlap-other-file`, default
+  **75**) — percent of a file's peaks whose unified window is also
+  occupied by a peak from another file.
+- **median_other_files** (`--min-median-other-files`, default **2**) —
+  median number of other files backing up a given peak from this file.
+
+A file is excluded if it fails *either* threshold. Use `--qc-report-only`
+to compute and write the metrics without excluding anything, or `--no-qc`
+to skip QC scoring entirely and just align once on all resolved input
+files.
+
 ## Install
 
 ```bash
@@ -47,7 +68,8 @@ python3 align_peaks.py \
     --genome hg38
 ```
 
-With a lower-priority tier of coordinate-only BED files mixed in:
+With a lower-priority tier of coordinate-only BED files mixed in, and
+custom QC thresholds:
 
 ```bash
 python3 align_peaks.py \
@@ -55,7 +77,9 @@ python3 align_peaks.py \
     --coord-input extra_peaks/*.bed \
     --outdir results \
     --window 300 \
-    --genome hg38
+    --genome hg38 \
+    --min-pct-overlap-other-file 75 \
+    --min-median-other-files 2
 ```
 
 ## Usage (Docker)
@@ -89,26 +113,18 @@ docker run --rm \
 Quote the `--input`/`--coord-input` globs so they're expanded inside the
 container, not by your local shell.
 
-The image's entrypoint is `align_peaks.py`; to run `qc_peaks.py` instead,
-override the entrypoint (same `--user`/volume conventions apply):
-
-```bash
-docker run --rm \
-    --user $(id -u):$(id -g) \
-    --entrypoint python3 \
-    -v /path/to/output:/results \
-    peak-alignment \
-    qc_peaks.py \
-    --mapping-tsv /results/mapping/all_peaks_mapped.tsv \
-    --outdir /results/qc \
-    --flag-below 50
-```
+## Arguments
 
 - `--input`: one or more narrowPeak files or glob patterns (tier 0, scored).
 - `--coord-input`: optional coordinate-only BED files or glob patterns
   (tier 1, lower priority — see Algorithm above).
-- `--exclude`: file basenames or glob patterns to drop from `--input`/
-  `--coord-input` before pooling — see the QC workflow below.
+- `--exclude`: file basenames or glob patterns to manually drop from
+  `--input`/`--coord-input` before pooling (independent of QC
+  auto-exclusion).
+- `--min-pct-overlap-other-file`: QC threshold, default 75 (see above).
+- `--min-median-other-files`: QC threshold, default 2 (see above).
+- `--no-qc`: skip QC scoring and auto-exclusion entirely.
+- `--qc-report-only`: compute/write QC metrics but don't exclude anything.
 - `--outdir`: output directory (created if missing).
 - `--window`: fixed window width in bp (default 300).
 - `--genome`: `hg38`, `hg19`, or `mm10` — used only to clip windows at
@@ -116,7 +132,8 @@ docker run --rm \
 
 ## Output
 
-- `results/unified_peaks.bed` — the final consensus peak set. Columns:
+- `results/unified_peaks.bed` — the final consensus peak set, reflecting
+  the QC-filtered file set (unless `--no-qc`/`--qc-report-only`). Columns:
   `chrom, start, end, unified_id, seed_tier, seed_signalValue, seed_width,
   seed_file, seed_peak_name, n_peaks_merged`. `seed_tier` is `0` if the
   window came from a scored peak, `1` if it came from a coordinate-only
@@ -124,9 +141,20 @@ docker run --rm \
 - `results/mapping/<original_file>.mapped.bed` — one per input file, one row
   per original peak in its original order. Headerless BED4: `chrom, start,
   end, unified_id` — the coordinates of the unified peak that original peak
-  maps to (its own original coordinates/score/etc. are not included).
-- `results/mapping/all_peaks_mapped.tsv` — same mapping for all input files
-  combined: `file_name, chrom, start, end, unified_id`.
+  maps to (its own original coordinates/score/etc. are not included). Only
+  covers files that passed QC (or all files if `--no-qc`/`--qc-report-only`).
+- `results/mapping/all_peaks_mapped.tsv` — same mapping for all covered
+  input files combined: `file_name, chrom, start, end, unified_id`.
+- `results/qc/file_quality_summary.tsv` — one row per file **from the
+  initial, pre-exclusion pass**: `file_name, n_peaks, n_unified_peaks,
+  n_supported_by_other, pct_overlap_other_file, mean_other_files,
+  median_other_files, max_other_files`. Sorted worst first. Not written if
+  `--no-qc`.
+- `results/qc/file_overlap_distribution.tsv` — long format: `file_name,
+  n_other_files, n_peaks, pct_of_file_peaks`.
+- `results/qc/excluded_files.txt` — one file_name per line, for files that
+  failed a QC threshold (whether or not they were actually excluded from
+  the final set — see `--qc-report-only`).
 
 ## Notes
 
@@ -142,56 +170,49 @@ docker run --rm \
   peak's original interval touches.
 - Chromosome sizes for clipping live in `chrom_sizes.py`; add a build there
   if you need one beyond hg38/hg19/mm10.
+- QC is a single pass: files are scored once against the initial full-data
+  alignment, then removed all at once. It isn't recursive (removing a
+  file doesn't trigger re-scoring and possibly excluding others).
+- If all input files fail the QC thresholds, the script exits with an
+  error rather than producing an empty unified set — loosen the
+  thresholds or use `--qc-report-only`.
+- The default thresholds assume a reasonably sized cohort. With very few
+  input files, `median_other_files` can't exceed `n_files - 1`, so small
+  file sets (e.g. 2-4 files, or files with several unique/singleton
+  peaks) may fail the default `--min-median-other-files 2` even when
+  everything looks fine — lower the threshold or use `--qc-report-only`
+  in that case.
 
-## Quality metrics per input file (qc_peaks.py)
+## Standalone QC re-analysis (qc_peaks.py)
 
-Once you've run `align_peaks.py`, `qc_peaks.py` scores each original input
-file by how reproducible its peaks are, using the mapping it already
-produced (no need to recompute overlaps):
+`align_peaks.py` computes and applies QC automatically, so you normally
+don't need to run this separately. `qc_peaks.py` is useful when you want
+to recompute or re-threshold metrics from an *existing*
+`all_peaks_mapped.tsv` without re-running the alignment (e.g. an older
+result set, or experimenting with different thresholds):
 
 ```bash
 python3 qc_peaks.py \
     --mapping-tsv results/mapping/all_peaks_mapped.tsv \
-    --outdir results/qc \
+    --outdir results/qc_manual \
     --flag-below 50
 ```
 
-For every original peak, we already know which unified window it landed
-in and, from that, which *other* input files also contributed a peak to
-that same window. That gives two per-file metrics:
+This writes the same `file_quality_summary.tsv` / `file_overlap_distribution.tsv`,
+plus (if `--flag-below` is given) a `flagged_files.txt` you can feed
+straight into `align_peaks.py --exclude`.
 
-- **pct_overlap_other_file** — percent of a file's peaks whose unified
-  window also contains a peak from at least one other file. A file
-  scoring low here is contributing peaks nobody else supports, which is a
-  reasonable proxy for a poor-quality replicate.
-- **the distribution of "how many other files back up each peak"** — for
-  a given file, how many of its peaks are supported by 0 other files, how
-  many by 1, by 2, and so on (`file_overlap_distribution.tsv`).
-
-Output:
-
-- `results/qc/file_quality_summary.tsv` — one row per file: `file_name,
-  n_peaks, n_unified_peaks, n_supported_by_other, pct_overlap_other_file,
-  mean_other_files, median_other_files, max_other_files`. Sorted worst
-  (lowest `pct_overlap_other_file`) first.
-- `results/qc/file_overlap_distribution.tsv` — long format: `file_name,
-  n_other_files, n_peaks, pct_of_file_peaks`.
-- `results/qc/flagged_files.txt` — only written if `--flag-below` is
-  given: one file_name per line, for files under that percentage.
-
-### Regenerating the unified set without low-quality files
-
-Review the summary table (and decide on a threshold — `--flag-below` is
-just a suggestion, not an automatic cutoff), then rerun `align_peaks.py`
-excluding the files you don't want:
+The Docker image's entrypoint is `align_peaks.py`; to run `qc_peaks.py`
+standalone, override the entrypoint:
 
 ```bash
-python3 align_peaks.py \
-    --input peaks/*.narrowPeak \
-    --exclude $(cat results/qc/flagged_files.txt) \
-    --outdir results_v2 \
-    --window 300 --genome hg38
+docker run --rm \
+    --user $(id -u):$(id -g) \
+    --entrypoint python3 \
+    -v /path/to/output:/results \
+    peak-alignment \
+    qc_peaks.py \
+    --mapping-tsv /results/mapping/all_peaks_mapped.tsv \
+    --outdir /results/qc_manual \
+    --flag-below 50
 ```
-
-`--exclude` also accepts glob patterns and works the same way for
-`--coord-input`.

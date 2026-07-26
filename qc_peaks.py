@@ -23,6 +23,13 @@ This does not recompute peak overlaps from scratch -- it reads the
 chrom, start, end, unified_id), so it stays fast even at tens of millions
 of peaks.
 
+Note: align_peaks.py now computes these same metrics and auto-excludes
+low-quality files itself (see its --min-pct-overlap-other-file /
+--min-median-other-files flags). Use this script standalone when you want
+to inspect or re-threshold metrics from an existing mapping table without
+re-running the alignment (e.g. an older result set, or trying out
+different thresholds).
+
 Usage
 -----
     python3 qc_peaks.py --mapping-tsv results/mapping/all_peaks_mapped.tsv \
@@ -47,53 +54,7 @@ import sys
 
 import pandas as pd
 
-
-def compute_metrics(df):
-    # Distinct files contributing to each unified peak. Since this is a
-    # per-unified-id count (not per-row), it doesn't matter if a single
-    # file contributes more than one of its own peaks to the same unified
-    # window -- that file is still counted once, so "n_other_files" is the
-    # same for every row of that file at that unified id.
-    n_files_at_unified = (
-        df.groupby("unified_id")["file_name"].nunique().rename("n_files_at_unified")
-    )
-    df = df.merge(n_files_at_unified, on="unified_id", how="left")
-    df["n_other_files"] = df["n_files_at_unified"] - 1
-    df["supported_by_other"] = df["n_other_files"] >= 1
-    return df
-
-
-def build_summary(df):
-    summary = df.groupby("file_name").agg(
-        n_peaks=("unified_id", "size"),
-        n_unified_peaks=("unified_id", "nunique"),
-        n_supported_by_other=("supported_by_other", "sum"),
-        mean_other_files=("n_other_files", "mean"),
-        median_other_files=("n_other_files", "median"),
-        max_other_files=("n_other_files", "max"),
-    ).reset_index()
-    summary["pct_overlap_other_file"] = (
-        100 * summary["n_supported_by_other"] / summary["n_peaks"]
-    )
-    summary = summary[
-        ["file_name", "n_peaks", "n_unified_peaks", "n_supported_by_other",
-         "pct_overlap_other_file", "mean_other_files", "median_other_files",
-         "max_other_files"]
-    ]
-    return summary.sort_values("pct_overlap_other_file").reset_index(drop=True)
-
-
-def build_distribution(df):
-    dist = (
-        df.groupby(["file_name", "n_other_files"])
-        .size()
-        .rename("n_peaks")
-        .reset_index()
-    )
-    dist["pct_of_file_peaks"] = (
-        100 * dist["n_peaks"] / dist.groupby("file_name")["n_peaks"].transform("sum")
-    )
-    return dist.sort_values(["file_name", "n_other_files"]).reset_index(drop=True)
+from qc_metrics import compute_metrics, build_summary, build_distribution
 
 
 def main():

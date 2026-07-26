@@ -41,16 +41,36 @@ seed its own window. A coordinate-only peak only seeds a new unified
 window in places no scored peak's original interval touches. Within tier
 1, wider peaks get priority over narrower ones under the same rule.
 
+Quality control and auto-exclusion
+-----------------------------------
+After the first alignment pass, every original peak is mapped to a unified
+window, which tells us which OTHER input files also placed a peak in that
+same window -- a direct measure of reproducibility. By default this script
+scores every input file on that basis and re-runs the alignment excluding
+any file that falls below either threshold:
+
+  - --min-pct-overlap-other-file (default 75): percent of a file's peaks
+    whose unified window is also occupied by a peak from another file.
+  - --min-median-other-files (default 2): median number of other files
+    backing up a given peak from this file.
+
+Use --qc-report-only to compute and write these metrics without excluding
+anything, or --no-qc to skip QC entirely.
+
 Output
 ------
 - <outdir>/unified_peaks.bed        Final non-overlapping 300bp consensus peaks
-  (with seed/provenance columns).
+  (with seed/provenance columns). Reflects the QC-filtered file set unless
+  --no-qc or --qc-report-only is given.
 - <outdir>/mapping/<file>.mapped.bed  Per input file, one row per original
   peak in its original order: a headerless BED4 of chrom, start, end,
   unified_id -- the coordinates of the unified peak that original peak was
   collapsed into (original peak's own coordinates/score/etc. are dropped).
 - <outdir>/mapping/all_peaks_mapped.tsv  Same mapping for all input files
   combined, with a file_name column added.
+- <outdir>/qc/file_quality_summary.tsv, <outdir>/qc/file_overlap_distribution.tsv,
+  <outdir>/qc/excluded_files.txt  QC metrics from the initial (pre-exclusion)
+  pass, and the list of files that were auto-excluded (unless --no-qc).
 
 Usage
 -----
@@ -73,6 +93,7 @@ import pandas as pd
 from intervaltree import IntervalTree
 
 from chrom_sizes import GENOME_SIZES
+from qc_metrics import compute_metrics, build_summary, build_distribution, flag_low_quality_files
 
 NARROWPEAK_COLS = [
     "chrom", "start", "end", "name", "score", "strand",
@@ -292,6 +313,28 @@ def write_outputs(peaks_df, unified_df, mapping, outdir):
     return unified_path, combined_path
 
 
+def run_qc(peaks_df, mapping, qc_dir, min_pct_overlap_other_file, min_median_other_files):
+    """Computes per-file QC metrics from an alignment pass, writes them to
+    qc_dir, and returns (summary_df, distribution_df, auto_excluded_files)."""
+    qc_input = peaks_df[["file_name", "global_id"]].copy()
+    qc_input["unified_id"] = qc_input["global_id"].map(mapping)
+    qc_input = compute_metrics(qc_input[["file_name", "unified_id"]])
+
+    summary = build_summary(qc_input)
+    distribution = build_distribution(qc_input)
+
+    os.makedirs(qc_dir, exist_ok=True)
+    summary_path = os.path.join(qc_dir, "file_quality_summary.tsv")
+    dist_path = os.path.join(qc_dir, "file_overlap_distribution.tsv")
+    summary.to_csv(summary_path, sep="\t", index=False)
+    distribution.to_csv(dist_path, sep="\t", index=False)
+
+    auto_excluded = flag_low_quality_files(
+        summary, min_pct_overlap_other_file, min_median_other_files
+    )
+    return summary, distribution, auto_excluded, summary_path, dist_path
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -325,6 +368,31 @@ def main():
     parser.add_argument(
         "--genome", default="hg38", choices=sorted(GENOME_SIZES.keys()),
         help="Genome build, used to clip windows to chromosome ends (default: hg38)",
+    )
+    parser.add_argument(
+        "--min-pct-overlap-other-file", type=float, default=75.0,
+        help=(
+            "QC threshold: a file is auto-excluded from the final unified "
+            "set if the percent of its peaks whose unified window is also "
+            "occupied by a peak from another file falls below this value "
+            "(default: 75)."
+        ),
+    )
+    parser.add_argument(
+        "--min-median-other-files", type=float, default=2.0,
+        help=(
+            "QC threshold: a file is auto-excluded if the median number of "
+            "other files supporting its peaks falls below this value "
+            "(default: 2)."
+        ),
+    )
+    parser.add_argument(
+        "--no-qc", action="store_true",
+        help="Skip QC scoring and auto-exclusion entirely; align once on all resolved input files.",
+    )
+    parser.add_argument(
+        "--qc-report-only", action="store_true",
+        help="Compute and write QC metrics, but do not auto-exclude any files from the final unified set.",
     )
     args = parser.parse_args()
 
@@ -361,18 +429,69 @@ def main():
     if args.coord_input and not coord_files:
         sys.exit("No input files found for --coord-input (after applying --exclude).")
 
+    genome_sizes = GENOME_SIZES[args.genome]
+
     print(f"Loading {len(input_files)} scored peak file(s)...")
     if coord_files:
         print(f"Loading {len(coord_files)} coordinate-only peak file(s) (lower-priority tier)...")
     peaks_df = build_peak_pool(input_files, coord_files)
     print(f"Total peaks pooled: {len(peaks_df)}")
 
-    genome_sizes = GENOME_SIZES[args.genome]
     unified_df, mapping = run_iterative_selection(peaks_df, args.window, genome_sizes)
     print(f"Unified peaks produced: {len(unified_df)}")
 
+    if not args.no_qc:
+        qc_dir = os.path.join(args.outdir, "qc")
+        summary, distribution, auto_excluded, summary_path, dist_path = run_qc(
+            peaks_df, mapping, qc_dir,
+            args.min_pct_overlap_other_file, args.min_median_other_files,
+        )
+        print()
+        print(summary.to_string(index=False))
+        print(f"\nQC summary:      {summary_path}")
+        print(f"QC distribution: {dist_path}")
+
+        if auto_excluded:
+            print(
+                f"\n{len(auto_excluded)} file(s) failed QC thresholds "
+                f"(pct_overlap_other_file < {args.min_pct_overlap_other_file} "
+                f"or median_other_files < {args.min_median_other_files}):"
+            )
+            for f in auto_excluded:
+                print(f"  {f}")
+            excluded_path = os.path.join(qc_dir, "excluded_files.txt")
+            with open(excluded_path, "w") as fh:
+                fh.write("\n".join(auto_excluded) + "\n")
+            print(f"Excluded file list: {excluded_path}")
+
+            if args.qc_report_only:
+                print("--qc-report-only set: keeping these files in the final unified set.")
+            else:
+                remaining_input = [
+                    f for f in input_files if os.path.basename(f) not in auto_excluded
+                ]
+                remaining_coord = [
+                    f for f in coord_files if os.path.basename(f) not in auto_excluded
+                ]
+                if not remaining_input:
+                    sys.exit(
+                        "All --input files failed the QC thresholds -- nothing left to "
+                        "align. Loosen --min-pct-overlap-other-file/--min-median-other-files "
+                        "or rerun with --qc-report-only."
+                    )
+                print(
+                    f"\nRe-running alignment on the {len(remaining_input)} file(s) that "
+                    f"passed QC ({len(remaining_coord)} coordinate-only)..."
+                )
+                peaks_df = build_peak_pool(remaining_input, remaining_coord)
+                print(f"Total peaks pooled (post-QC): {len(peaks_df)}")
+                unified_df, mapping = run_iterative_selection(peaks_df, args.window, genome_sizes)
+                print(f"Unified peaks produced (post-QC): {len(unified_df)}")
+        else:
+            print("\nAll files passed QC thresholds -- nothing excluded.")
+
     unified_path, combined_path = write_outputs(peaks_df, unified_df, mapping, args.outdir)
-    print(f"Unified peak set:      {unified_path}")
+    print(f"\nUnified peak set:      {unified_path}")
     print(f"Combined mapping:      {combined_path}")
     print(f"Per-file mapped beds:  {os.path.join(args.outdir, 'mapping')}/")
 
