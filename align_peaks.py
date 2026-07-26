@@ -3,31 +3,43 @@
 align_peaks.py
 
 Build a unified, non-overlapping consensus peak set across multiple
-narrowPeak (MACS2) files, and map every original peak in every input
-file to the unified peak it was collapsed into.
+narrowPeak (MACS2) files -- optionally alongside coordinate-only BED files
+that carry no signal/summit information -- and map every original peak in
+every input file to the unified peak it was collapsed into.
 
-Algorithm (iterative greedy summit-window selection)
------------------------------------------------------
-1. Pool all peaks from all input files together.
-2. Repeat until the pool is empty:
-     a. Take the peak in the pool with the strongest signal (signalValue,
-        narrowPeak column 7) -- this is the "seed" peak.
+Algorithm (iterative greedy summit-window selection, two priority tiers)
+--------------------------------------------------------------------------
+Peaks come in two tiers:
+  - Tier 0 ("scored"): narrowPeak entries, ranked by signalValue.
+  - Tier 1 ("coordinate-only"): plain BED entries with no score or summit,
+    ranked by peak width (wider first), used only as a fallback signal in
+    the absence of anything better.
+
+1. Pool all peaks from all input files (both tiers) together.
+2. Process peaks in priority order -- every tier 0 peak (by descending
+   signalValue) before any tier 1 peak (by descending width). Repeat until
+   the pool is empty:
+     a. Take the next peak in that order that hasn't already been consumed
+        -- this is the "seed" peak.
      b. Build a fixed-width window (default 300bp) centered on the seed
-        peak's summit (chromStart + summit offset, narrowPeak column 10).
-        Clip the window to chromosome boundaries.
+        peak's summit (narrowPeak: chromStart + summit offset; coordinate-
+        only: interval midpoint). Clip the window to chromosome boundaries.
      c. Find every other peak still in the pool whose ORIGINAL interval
-        overlaps the seed peak's ORIGINAL interval. Remove the seed peak
-        and all of these overlapping peaks from the pool. Record that each
-        of them (seed included) maps to the new unified window.
+        overlaps the seed peak's ORIGINAL interval, regardless of tier.
+        Remove the seed peak and all of these overlapping peaks from the
+        pool. Record that each of them (seed included) maps to the new
+        unified window.
      d. Continue with whatever peaks remain in the pool (they did not
         overlap the seed peak).
 3. The set of fixed-width windows created in step (b) across all
    iterations is the unified peak set.
 
-Because peaks are always processed in descending signal order and a peak
-is only ever consumed once, this is equivalent to literally repeating
-"among overlapping peaks, keep the strongest, resize it, continue with the
-non-overlapping remainder" until no peaks are left.
+Because tier 0 peaks are always processed before tier 1 peaks, any
+coordinate-only peak that overlaps a scored peak gets absorbed into that
+scored peak's window during tier 0 processing and never gets a turn to
+seed its own window. A coordinate-only peak only seeds a new unified
+window in places no scored peak's original interval touches. Within tier
+1, wider peaks get priority over narrower ones under the same rule.
 
 Output
 ------
@@ -40,12 +52,17 @@ Usage
 -----
     python3 align_peaks.py --input peaks/*.narrowPeak --outdir results \
         --window 300 --genome hg38
+
+    # with a lower-priority tier of coordinate-only BED files (chrom, start,
+    # end[, name]) mixed in:
+    python3 align_peaks.py --input peaks/*.narrowPeak \
+        --coord-input extra_peaks/*.bed --outdir results \
+        --window 300 --genome hg38
 """
 import argparse
 import glob
 import os
 import sys
-from dataclasses import dataclass
 
 import pandas as pd
 from intervaltree import IntervalTree
@@ -57,19 +74,15 @@ NARROWPEAK_COLS = [
     "signalValue", "pValue", "qValue", "summit_offset",
 ]
 
+# Common schema every peak (scored or coordinate-only) is normalized to.
+COMMON_COLS = [
+    "chrom", "start", "end", "name", "score", "strand",
+    "signalValue", "pValue", "qValue", "summit_offset",
+    "summit", "tier", "width", "rank_value",
+]
 
-@dataclass
-class Peak:
-    global_id: int
-    file_index: int
-    file_name: str
-    orig_line_index: int
-    chrom: str
-    start: int
-    end: int
-    name: str
-    signalValue: float
-    summit: int  # absolute summit position
+TIER_SCORED = 0
+TIER_COORD_ONLY = 1
 
 
 def load_narrowpeak(path, file_index):
@@ -78,8 +91,7 @@ def load_narrowpeak(path, file_index):
     if ncols < 10:
         raise ValueError(
             f"{path}: expected narrowPeak with >=10 columns, got {ncols}. "
-            "If these are plain BED files without a summit/signal column, "
-            "this script needs to be adapted for that format."
+            "Use --coord-input instead if these are coordinate-only BED files."
         )
     df = df.iloc[:, :10]
     df.columns = NARROWPEAK_COLS
@@ -93,13 +105,52 @@ def load_narrowpeak(path, file_index):
     df.loc[~has_summit, "summit"] = (
         (df.loc[~has_summit, "start"] + df.loc[~has_summit, "end"]) // 2
     )
-    return df
+    df["tier"] = TIER_SCORED
+    df["width"] = df["end"] - df["start"]
+    df["rank_value"] = df["signalValue"]
+    return df[COMMON_COLS + ["file_index", "file_name", "orig_line_index"]]
 
 
-def build_peak_pool(input_files):
+def load_coord_only(path, file_index):
+    """Plain BED with just chrom/start/end (a 4th name column is used if
+    present). No score and no summit -- ranked within its own lower-priority
+    tier by peak width, and centered on the interval midpoint."""
+    df = pd.read_csv(path, sep="\t", header=None, comment="#")
+    ncols = df.shape[1]
+    if ncols < 3:
+        raise ValueError(f"{path}: expected at least 3 columns (chrom, start, end).")
+    df = df.iloc[:, :4] if ncols >= 4 else df.iloc[:, :3]
+    if ncols >= 4:
+        df.columns = ["chrom", "start", "end", "name"]
+    else:
+        df.columns = ["chrom", "start", "end"]
+        df["name"] = [f"coord_peak_{i}" for i in df.index]
+
+    df["file_index"] = file_index
+    df["file_name"] = os.path.basename(path)
+    df["orig_line_index"] = df.index
+    df["score"] = float("nan")
+    df["strand"] = "."
+    df["signalValue"] = float("nan")
+    df["pValue"] = float("nan")
+    df["qValue"] = float("nan")
+    df["summit_offset"] = float("nan")
+    df["summit"] = (df["start"] + df["end"]) // 2
+    df["tier"] = TIER_COORD_ONLY
+    df["width"] = df["end"] - df["start"]
+    df["rank_value"] = df["width"]
+    return df[COMMON_COLS + ["file_index", "file_name", "orig_line_index"]]
+
+
+def build_peak_pool(scored_files, coord_only_files):
     frames = []
-    for i, path in enumerate(input_files):
+    for i, path in enumerate(scored_files):
         frames.append(load_narrowpeak(path, i))
+    offset = len(scored_files)
+    for j, path in enumerate(coord_only_files):
+        frames.append(load_coord_only(path, offset + j))
+    if not frames:
+        raise ValueError("No input peak files provided.")
     combined = pd.concat(frames, ignore_index=True)
     combined["global_id"] = combined.index
     return combined
@@ -136,8 +187,10 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
     trees = build_chrom_trees(peaks_df)
     by_id = peaks_df.set_index("global_id")
 
+    # Tier 0 (scored) entirely before tier 1 (coordinate-only); descending
+    # rank_value within each tier (signalValue for tier 0, width for tier 1).
     order = peaks_df.sort_values(
-        "signalValue", ascending=False
+        ["tier", "rank_value"], ascending=[True, False]
     )["global_id"].tolist()
 
     consumed = set()
@@ -171,7 +224,9 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
             "start": start,
             "end": end,
             "unified_id": uid,
+            "seed_tier": int(seed["tier"]),
             "seed_signalValue": seed["signalValue"],
+            "seed_width": int(seed["width"]),
             "seed_file": seed["file_name"],
             "seed_peak_name": seed["name"],
             "n_peaks_merged": len(overlapping_ids),
@@ -211,6 +266,7 @@ def write_outputs(peaks_df, unified_df, mapping, outdir):
     out_cols = [
         "chrom", "start", "end", "name", "score", "strand",
         "signalValue", "pValue", "qValue", "summit_offset", "summit",
+        "tier", "width",
         "unified_id", "unified_chrom", "unified_start", "unified_end",
     ]
 
@@ -232,6 +288,16 @@ def main():
         "--input", nargs="+", required=True,
         help="narrowPeak files or glob patterns (e.g. peaks/*.narrowPeak)",
     )
+    parser.add_argument(
+        "--coord-input", nargs="+", default=[],
+        help=(
+            "Optional coordinate-only BED files or glob patterns "
+            "(chrom, start, end[, name] -- no score/summit). Treated as a "
+            "strictly lower-priority tier: only ever seeds a unified window "
+            "in regions no --input peak occupies, ranked by width within "
+            "the tier."
+        ),
+    )
     parser.add_argument("--outdir", required=True, help="Output directory")
     parser.add_argument(
         "--window", type=int, default=300,
@@ -243,16 +309,25 @@ def main():
     )
     args = parser.parse_args()
 
-    input_files = []
-    for pattern in args.input:
-        matches = sorted(glob.glob(pattern))
-        input_files.extend(matches if matches else [pattern])
-    input_files = [f for f in input_files if os.path.isfile(f)]
-    if not input_files:
-        sys.exit("No input files found.")
+    def resolve(patterns):
+        files = []
+        for pattern in patterns:
+            matches = sorted(glob.glob(pattern))
+            files.extend(matches if matches else [pattern])
+        return [f for f in files if os.path.isfile(f)]
 
-    print(f"Loading {len(input_files)} peak file(s)...")
-    peaks_df = build_peak_pool(input_files)
+    input_files = resolve(args.input)
+    if not input_files:
+        sys.exit("No input files found for --input.")
+
+    coord_files = resolve(args.coord_input) if args.coord_input else []
+    if args.coord_input and not coord_files:
+        sys.exit("No input files found for --coord-input.")
+
+    print(f"Loading {len(input_files)} scored peak file(s)...")
+    if coord_files:
+        print(f"Loading {len(coord_files)} coordinate-only peak file(s) (lower-priority tier)...")
+    peaks_df = build_peak_pool(input_files, coord_files)
     print(f"Total peaks pooled: {len(peaks_df)}")
 
     genome_sizes = GENOME_SIZES[args.genome]
