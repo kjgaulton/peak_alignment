@@ -85,11 +85,19 @@ def main():
     summary = build_summary(df)
     distribution = build_distribution(df)
 
-    os.makedirs(args.outdir, exist_ok=True)
-    summary_path = os.path.join(args.outdir, "file_quality_summary.tsv")
-    dist_path = os.path.join(args.outdir, "file_overlap_distribution.tsv")
-    summary.to_csv(summary_path, sep="\t", index=False)
-    distribution.to_csv(dist_path, sep="\t", index=False)
+    try:
+        os.makedirs(args.outdir, exist_ok=True)
+        summary_path = os.path.join(args.outdir, "file_quality_summary.tsv")
+        dist_path = os.path.join(args.outdir, "file_overlap_distribution.tsv")
+        summary.to_csv(summary_path, sep="\t", index=False)
+        distribution.to_csv(dist_path, sep="\t", index=False)
+    except PermissionError as exc:
+        sys.exit(
+            f"\nPermissionError writing output: {exc}\n\n"
+            f"Likely a Docker + NFS root-squash mismatch: make sure --outdir "
+            f"already exists and is owned by you, and run the container as "
+            f"your own user, e.g. --user $(id -u):$(id -g)."
+        )
 
     print(summary.to_string(index=False))
     print(f"\nSummary:     {summary_path}")

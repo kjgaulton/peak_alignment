@@ -368,6 +368,20 @@ def run_qc(peaks_df, mapping, qc_dir, min_pct_overlap_other_file, min_median_oth
     return summary, distribution, auto_excluded, summary_path, dist_path
 
 
+def _explain_permission_error(exc, outdir):
+    sys.exit(
+        f"\nPermissionError writing output: {exc}\n\n"
+        f"This is almost always a Docker + NFS root-squash mismatch, not a "
+        f"bug: the container is writing as root, but '{outdir}' (or a "
+        f"subdirectory already inside it) is on an NFS mount that maps "
+        f"root to an unprivileged user with no write access.\n\n"
+        f"Fix: make sure --outdir already exists and is owned by you, and "
+        f"run the container as your own user/group, e.g.:\n"
+        f"    mkdir -p {outdir}\n"
+        f"    docker run --rm --user $(id -u):$(id -g) -v ... peak-alignment ...\n"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -475,10 +489,13 @@ def main():
 
     if not args.no_qc:
         qc_dir = os.path.join(args.outdir, "qc")
-        summary, distribution, auto_excluded, summary_path, dist_path = run_qc(
-            peaks_df, mapping, qc_dir,
-            args.min_pct_overlap_other_file, args.min_median_other_files,
-        )
+        try:
+            summary, distribution, auto_excluded, summary_path, dist_path = run_qc(
+                peaks_df, mapping, qc_dir,
+                args.min_pct_overlap_other_file, args.min_median_other_files,
+            )
+        except PermissionError as exc:
+            _explain_permission_error(exc, args.outdir)
         print()
         print(summary.to_string(index=False))
         print(f"\nQC summary:      {summary_path}")
@@ -493,8 +510,11 @@ def main():
             for f in auto_excluded:
                 print(f"  {f}")
             excluded_path = os.path.join(qc_dir, "excluded_files.txt")
-            with open(excluded_path, "w") as fh:
-                fh.write("\n".join(auto_excluded) + "\n")
+            try:
+                with open(excluded_path, "w") as fh:
+                    fh.write("\n".join(auto_excluded) + "\n")
+            except PermissionError as exc:
+                _explain_permission_error(exc, args.outdir)
             print(f"Excluded file list: {excluded_path}")
 
             if args.qc_report_only:
@@ -523,7 +543,10 @@ def main():
         else:
             print("\nAll files passed QC thresholds -- nothing excluded.")
 
-    unified_path, combined_path = write_outputs(peaks_df, unified_df, mapping, args.outdir)
+    try:
+        unified_path, combined_path = write_outputs(peaks_df, unified_df, mapping, args.outdir)
+    except PermissionError as exc:
+        _explain_permission_error(exc, args.outdir)
     print(f"\nUnified peak set:      {unified_path}")
     print(f"Combined mapping:      {combined_path}")
     print(f"Per-file mapped beds:  {os.path.join(args.outdir, 'mapping')}/")
