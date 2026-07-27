@@ -69,11 +69,22 @@ any file that falls below either threshold:
 Use --qc-report-only to compute and write these metrics without excluding
 anything, or --no-qc to skip QC entirely.
 
+Blacklist filtering
+--------------------
+If --blacklist-bed is given, any unified peak (from the final, post-QC
+set) that overlaps a region in that BED file is dropped entirely, and any
+original peak that had mapped to it is dropped from the mapping outputs
+too. This does not bundle ENCODE blacklist region data itself -- supply
+the BED file yourself, e.g. the official ENCODE blacklist v2 lists from
+https://github.com/Boyle-Lab/Blacklist/tree/master/lists (see
+blacklist.py for exact download commands).
+
 Output
 ------
 - <outdir>/unified_peaks.bed        Final non-overlapping 300bp consensus peaks
   (with seed/provenance columns). Reflects the QC-filtered file set unless
-  --no-qc or --qc-report-only is given.
+  --no-qc or --qc-report-only is given, and excludes any blacklisted peaks
+  if --blacklist-bed was given.
 - <outdir>/mapping/<file>.mapped.bed  Per input file, one row per original
   peak in its original order: a headerless BED4 of chrom, start, end,
   unified_id -- the coordinates of the unified peak that original peak was
@@ -83,6 +94,8 @@ Output
 - <outdir>/qc/file_quality_summary.tsv, <outdir>/qc/file_overlap_distribution.tsv,
   <outdir>/qc/excluded_files.txt  QC metrics from the initial (pre-exclusion)
   pass, and the list of files that were auto-excluded (unless --no-qc).
+- <outdir>/blacklist_removed_peaks.bed  Unified peaks that were dropped for
+  overlapping --blacklist-bed (only written if --blacklist-bed is given).
 
 Usage
 -----
@@ -106,6 +119,7 @@ from intervaltree import IntervalTree
 
 from chrom_sizes import GENOME_SIZES
 from qc_metrics import compute_metrics, build_summary, build_distribution, flag_low_quality_files
+from blacklist import load_blacklist, filter_unified_peaks
 
 NARROWPEAK_COLS = [
     "chrom", "start", "end", "name", "score", "strand",
@@ -407,6 +421,15 @@ def main():
             "basename of each resolved input file."
         ),
     )
+    parser.add_argument(
+        "--blacklist-bed", default=None,
+        help=(
+            "Optional BED file of blacklist regions (e.g. ENCODE blacklist "
+            "v2 -- see blacklist.py for official download links). Any "
+            "final unified peak overlapping a region in this file is "
+            "dropped, along with any original peaks mapped to it."
+        ),
+    )
     parser.add_argument("--outdir", required=True, help="Output directory")
     parser.add_argument(
         "--window", type=int, default=300,
@@ -542,6 +565,27 @@ def main():
                 print(f"Unified peaks produced (post-QC): {len(unified_df)}")
         else:
             print("\nAll files passed QC thresholds -- nothing excluded.")
+
+    if args.blacklist_bed:
+        print(f"\nApplying blacklist filter: {args.blacklist_bed}")
+        try:
+            blacklist_trees = load_blacklist(args.blacklist_bed)
+        except FileNotFoundError as exc:
+            sys.exit(str(exc))
+        unified_df, mapping, removed_df = filter_unified_peaks(unified_df, mapping, blacklist_trees)
+        peaks_df = peaks_df[peaks_df["global_id"].isin(mapping.keys())].reset_index(drop=True)
+        print(f"Removed {len(removed_df)} unified peak(s) overlapping the blacklist.")
+        if len(removed_df):
+            try:
+                os.makedirs(args.outdir, exist_ok=True)
+                removed_path = os.path.join(args.outdir, "blacklist_removed_peaks.bed")
+                removed_df.sort_values(["chrom", "start"]).to_csv(
+                    removed_path, sep="\t", header=True, index=False
+                )
+            except PermissionError as exc:
+                _explain_permission_error(exc, args.outdir)
+            print(f"Removed peaks written to: {removed_path}")
+        print(f"Unified peaks remaining: {len(unified_df)}")
 
     try:
         unified_path, combined_path = write_outputs(peaks_df, unified_df, mapping, args.outdir)

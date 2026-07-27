@@ -66,6 +66,26 @@ to compute and write the metrics without excluding anything, or `--no-qc`
 to skip QC scoring entirely and just align once on all resolved input
 files.
 
+## Blacklist filtering
+
+If `--blacklist-bed` is given, any final unified peak (post-QC) that
+overlaps a region in that BED file is dropped entirely, along with any
+original peak mapped to it. This does *not* bundle ENCODE blacklist region
+data — supply the file yourself. Official ENCODE blacklist v2 lists
+(hg38/hg19/mm10) are published by the Boyle lab:
+
+```bash
+wget https://github.com/Boyle-Lab/Blacklist/raw/master/lists/hg38-blacklist.v2.bed.gz
+gunzip hg38-blacklist.v2.bed.gz
+```
+
+```bash
+python3 align_peaks.py \
+    --input peaks/*.narrowPeak \
+    --outdir results \
+    --blacklist-bed hg38-blacklist.v2.bed
+```
+
 ## Install
 
 ```bash
@@ -125,7 +145,22 @@ docker run --rm \
 ```
 
 Quote the `--input`/`--coord-input` globs so they're expanded inside the
-container, not by your local shell.
+container, not by your local shell. If using `--blacklist-bed`, make sure
+that file lives somewhere already mounted (e.g. alongside your peaks under
+`/data`), since blacklist data isn't bundled in the image:
+
+```bash
+docker run --rm \
+    --user $(id -u):$(id -g) \
+    -v /path/to/peaks:/data \
+    -v /path/to/output:/results \
+    peak-alignment \
+    --input "/data/*.narrowPeak" \
+    --blacklist-bed /data/hg38-blacklist.v2.bed \
+    --outdir /results \
+    --window 300 \
+    --genome hg38
+```
 
 ## Arguments
 
@@ -139,6 +174,8 @@ container, not by your local shell.
 - `--min-median-other-files`: QC threshold, default 2 (see above).
 - `--no-qc`: skip QC scoring and auto-exclusion entirely.
 - `--qc-report-only`: compute/write QC metrics but don't exclude anything.
+- `--blacklist-bed`: BED file of regions to drop final unified peaks
+  overlapping (e.g. ENCODE blacklist) — see Blacklist filtering above.
 - `--outdir`: output directory (created if missing).
 - `--window`: fixed window width in bp (default 300).
 - `--genome`: `hg38`, `hg19`, or `mm10` — used only to clip windows at
@@ -169,6 +206,9 @@ container, not by your local shell.
 - `results/qc/excluded_files.txt` — one file_name per line, for files that
   failed a QC threshold (whether or not they were actually excluded from
   the final set — see `--qc-report-only`).
+- `results/blacklist_removed_peaks.bed` — unified peaks dropped for
+  overlapping `--blacklist-bed` (only written if given, and if at least
+  one peak was removed).
 
 ## Notes
 
