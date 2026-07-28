@@ -286,3 +286,41 @@ docker run --rm \
     --mapping-tsv /results/mapping/all_peaks_mapped.tsv \
     --outdir /results/qc_manual
 ```
+
+## Unified-peak-set QC plots (plot_qc.py)
+
+`qc_peaks.py` scores individual input *files*; `plot_qc.py` instead looks
+at the unified peak set as a whole, using the same mapping output:
+
+```bash
+python3 plot_qc.py \
+    --mapping-tsv results/mapping/all_peaks_mapped.tsv \
+    --outdir results/qc_plots
+```
+
+Produces two plots (plus the underlying TSVs):
+
+- **`peak_support_distribution.png`** — a histogram of how many distinct
+  input files support each unified peak (i.e. placed at least one
+  original peak in that window). Shows whether the unified set skews
+  toward singleton/low-reproducibility peaks or a reproducible core.
+- **`peaks_retained_by_min_support.png`** — the number of unified peaks
+  that would remain if you required at least K supporting files, for
+  every K from 1 up to the total number of input files. A step plot that
+  answers "how much of the peak set survives at each reproducibility
+  bar," computed directly from the existing mapping output (no
+  re-running the alignment on file subsets).
+
+Requires `matplotlib` (in `requirements.txt`). Via Docker, override the
+entrypoint the same way as `qc_peaks.py`:
+
+```bash
+docker run --rm \
+    --user $(id -u):$(id -g) \
+    --entrypoint python3 \
+    -v /path/to/output:/results \
+    peak-alignment \
+    plot_qc.py \
+    --mapping-tsv /results/mapping/all_peaks_mapped.tsv \
+    --outdir /results/qc_plots
+```

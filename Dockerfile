@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY align_peaks.py chrom_sizes.py qc_peaks.py qc_metrics.py blacklist.py ./
+COPY align_peaks.py chrom_sizes.py qc_peaks.py qc_metrics.py blacklist.py plot_qc.py ./
 
 # /data is where input narrowPeak files should be mounted, /results is where
 # output gets written. Both are just conventions -- override with -v. If
