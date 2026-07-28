@@ -25,15 +25,15 @@ of peaks.
 
 Note: align_peaks.py now computes these same metrics and auto-excludes
 low-quality files itself (see its --min-pct-overlap-other-file /
---min-median-other-files flags). Use this script standalone when you want
-to inspect or re-threshold metrics from an existing mapping table without
-re-running the alignment (e.g. an older result set, or trying out
-different thresholds).
+--min-median-other-files / --min-max-other-files flags, mirrored here).
+Use this script standalone when you want to inspect or re-threshold
+metrics from an existing mapping table without re-running the alignment
+(e.g. an older result set, or trying out different thresholds).
 
 Usage
 -----
     python3 qc_peaks.py --mapping-tsv results/mapping/all_peaks_mapped.tsv \
-        --outdir results/qc --flag-below 50
+        --outdir results/qc
 
 Output
 ------
@@ -41,9 +41,9 @@ Output
   metrics above.
 - <outdir>/file_overlap_distribution.tsv  Long-format: file_name,
   n_other_files, n_peaks, pct_of_file_peaks.
-- <outdir>/flagged_files.txt   One file_name per line, for any file whose
-  pct_overlap_other_file fell below --flag-below (only written if
-  --flag-below is given). Feed straight into align_peaks.py's --exclude:
+- <outdir>/flagged_files.txt   One file_name per line, for any file
+  failing a threshold (only written if at least one file is flagged).
+  Feed straight into align_peaks.py's --exclude:
       python3 align_peaks.py --input peaks/*.narrowPeak \\
           --exclude $(cat results/qc/flagged_files.txt) \\
           --outdir results_v2 ...
@@ -54,7 +54,7 @@ import sys
 
 import pandas as pd
 
-from qc_metrics import compute_metrics, build_summary, build_distribution
+from qc_metrics import compute_metrics, build_summary, build_distribution, flag_low_quality_files
 
 
 def main():
@@ -65,10 +65,19 @@ def main():
     )
     parser.add_argument("--outdir", required=True, help="Output directory")
     parser.add_argument(
-        "--flag-below", type=float, default=None,
+        "--min-pct-overlap-other-file", type=float, default=75.0,
+        help="Flag a file if this percentage of its peaks aren't backed by another file (default: 75).",
+    )
+    parser.add_argument(
+        "--min-median-other-files", type=float, default=2.0,
+        help="Flag a file if the median number of other files backing its peaks is below this (default: 2).",
+    )
+    parser.add_argument(
+        "--min-max-other-files", type=float, default=None,
         help=(
-            "If set, write flagged_files.txt listing any file whose "
-            "pct_overlap_other_file is below this percentage (e.g. 50)."
+            "Flag a file if even its best-supported peak is backed by "
+            "fewer than this many other files. Default: half the number "
+            "of distinct files in the mapping table."
         ),
     )
     args = parser.parse_args()
@@ -84,6 +93,12 @@ def main():
     df = compute_metrics(df)
     summary = build_summary(df)
     distribution = build_distribution(df)
+
+    min_max_other_files = (
+        args.min_max_other_files
+        if args.min_max_other_files is not None
+        else df["file_name"].nunique() / 2
+    )
 
     try:
         os.makedirs(args.outdir, exist_ok=True)
@@ -103,17 +118,25 @@ def main():
     print(f"\nSummary:     {summary_path}")
     print(f"Distribution: {dist_path}")
 
-    if args.flag_below is not None:
-        flagged = summary.loc[
-            summary["pct_overlap_other_file"] < args.flag_below, "file_name"
-        ].tolist()
+    flagged = flag_low_quality_files(
+        summary, args.min_pct_overlap_other_file, args.min_median_other_files,
+        min_max_other_files,
+    )
+    print(
+        f"\nThresholds: pct_overlap_other_file < {args.min_pct_overlap_other_file}, "
+        f"median_other_files < {args.min_median_other_files}, "
+        f"max_other_files < {min_max_other_files:g}"
+    )
+    if flagged:
         flagged_path = os.path.join(args.outdir, "flagged_files.txt")
         with open(flagged_path, "w") as fh:
-            fh.write("\n".join(flagged) + ("\n" if flagged else ""))
-        print(f"\nFlagged {len(flagged)} file(s) below {args.flag_below}% overlap-with-other-file rate:")
+            fh.write("\n".join(flagged) + "\n")
+        print(f"Flagged {len(flagged)} file(s):")
         for f in flagged:
             print(f"  {f}")
         print(f"Flagged list: {flagged_path}")
+    else:
+        print("No files flagged.")
 
 
 if __name__ == "__main__":

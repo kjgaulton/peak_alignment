@@ -67,12 +67,22 @@ def build_distribution(df):
     return dist.sort_values(["file_name", "n_other_files"]).reset_index(drop=True)
 
 
-def flag_low_quality_files(summary, min_pct_overlap_other_file, min_median_other_files):
-    """Returns the list of file_names in `summary` that fail either
-    threshold: pct_overlap_other_file below min_pct_overlap_other_file, or
-    median_other_files below min_median_other_files."""
+def flag_low_quality_files(
+    summary, min_pct_overlap_other_file, min_median_other_files, min_max_other_files
+):
+    """Returns the list of file_names in `summary` that fail any of three
+    thresholds: pct_overlap_other_file below min_pct_overlap_other_file,
+    median_other_files below min_median_other_files, or max_other_files
+    below min_max_other_files.
+
+    max_other_files is the best-supported peak a file has -- i.e. even the
+    single peak from this file backed up by the most other files. Failing
+    this threshold means the file doesn't have even one peak reproduced
+    across a meaningful fraction of the cohort.
+    """
     fails = (
         (summary["pct_overlap_other_file"] < min_pct_overlap_other_file)
         | (summary["median_other_files"] < min_median_other_files)
+        | (summary["max_other_files"] < min_max_other_files)
     )
     return summary.loc[fails, "file_name"].tolist()

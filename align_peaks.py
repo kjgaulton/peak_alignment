@@ -59,12 +59,16 @@ After the first alignment pass, every original peak is mapped to a unified
 window, which tells us which OTHER input files also placed a peak in that
 same window -- a direct measure of reproducibility. By default this script
 scores every input file on that basis and re-runs the alignment excluding
-any file that falls below either threshold:
+any file that falls below any of three thresholds:
 
   - --min-pct-overlap-other-file (default 75): percent of a file's peaks
     whose unified window is also occupied by a peak from another file.
   - --min-median-other-files (default 2): median number of other files
     backing up a given peak from this file.
+  - --min-max-other-files (default: half the number of files entering
+    this QC pass): number of other files backing up this file's single
+    BEST-supported peak. Catches a file with no peak reproduced across a
+    meaningful fraction of the cohort, even if its other metrics pass.
 
 Use --qc-report-only to compute and write these metrics without excluding
 anything, or --no-qc to skip QC entirely.
@@ -360,7 +364,10 @@ def write_outputs(peaks_df, unified_df, mapping, outdir):
     return unified_path, combined_path
 
 
-def run_qc(peaks_df, mapping, qc_dir, min_pct_overlap_other_file, min_median_other_files):
+def run_qc(
+    peaks_df, mapping, qc_dir,
+    min_pct_overlap_other_file, min_median_other_files, min_max_other_files,
+):
     """Computes per-file QC metrics from an alignment pass, writes them to
     qc_dir, and returns (summary_df, distribution_df, auto_excluded_files)."""
     qc_input = peaks_df[["file_name", "global_id"]].copy()
@@ -377,7 +384,7 @@ def run_qc(peaks_df, mapping, qc_dir, min_pct_overlap_other_file, min_median_oth
     distribution.to_csv(dist_path, sep="\t", index=False)
 
     auto_excluded = flag_low_quality_files(
-        summary, min_pct_overlap_other_file, min_median_other_files
+        summary, min_pct_overlap_other_file, min_median_other_files, min_max_other_files
     )
     return summary, distribution, auto_excluded, summary_path, dist_path
 
@@ -457,6 +464,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--min-max-other-files", type=float, default=None,
+        help=(
+            "QC threshold: a file is auto-excluded if even its single "
+            "best-supported peak (max_other_files) is backed by fewer "
+            "than this many other files -- i.e. it has no peak reproduced "
+            "across a meaningful fraction of the cohort. Default: half "
+            "the number of files entering this QC pass."
+        ),
+    )
+    parser.add_argument(
         "--no-qc", action="store_true",
         help="Skip QC scoring and auto-exclusion entirely; align once on all resolved input files.",
     )
@@ -511,11 +528,18 @@ def main():
     print(f"Unified peaks produced: {len(unified_df)}")
 
     if not args.no_qc:
+        n_files_in_pass = len(input_files) + len(coord_files)
+        min_max_other_files = (
+            args.min_max_other_files
+            if args.min_max_other_files is not None
+            else n_files_in_pass / 2
+        )
         qc_dir = os.path.join(args.outdir, "qc")
         try:
             summary, distribution, auto_excluded, summary_path, dist_path = run_qc(
                 peaks_df, mapping, qc_dir,
                 args.min_pct_overlap_other_file, args.min_median_other_files,
+                min_max_other_files,
             )
         except PermissionError as exc:
             _explain_permission_error(exc, args.outdir)
@@ -527,8 +551,10 @@ def main():
         if auto_excluded:
             print(
                 f"\n{len(auto_excluded)} file(s) failed QC thresholds "
-                f"(pct_overlap_other_file < {args.min_pct_overlap_other_file} "
-                f"or median_other_files < {args.min_median_other_files}):"
+                f"(pct_overlap_other_file < {args.min_pct_overlap_other_file}, "
+                f"median_other_files < {args.min_median_other_files}, or "
+                f"max_other_files < {min_max_other_files:g} "
+                f"[{'explicit' if args.min_max_other_files is not None else 'auto: half of ' + str(n_files_in_pass) + ' files'}]):"
             )
             for f in auto_excluded:
                 print(f"  {f}")
