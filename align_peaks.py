@@ -483,6 +483,17 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.blacklist_bed and not os.path.isfile(args.blacklist_bed):
+        sys.exit(
+            f"--blacklist-bed file not found: {args.blacklist_bed}\n\n"
+            f"If you're running in Docker, remember this path is looked up "
+            f"INSIDE the container -- a host path only exists there if you "
+            f"mounted it with -v. Either copy the blacklist file into an "
+            f"already-mounted directory (e.g. alongside your peaks under "
+            f"/data) or add another -v mount for wherever it lives, then "
+            f"point --blacklist-bed at the container-side path."
+        )
+
     def resolve(patterns):
         files = []
         for pattern in patterns:
