@@ -94,6 +94,29 @@ python3 align_peaks.py \
     --blacklist-bed hg38-blacklist.v2.bed
 ```
 
+## Biosample annotation
+
+If `--metadata-file` is given, `unified_peaks.bed` gets a `biosamples`
+column: the deduplicated biosample IDs of every assay/file overlapping
+that peak. The metadata file is a delimited text file (tab or comma,
+auto-detected) with a header row containing a file-identifier column and
+a biosample column — see `metadata.py` for the exact column names
+matched (e.g. `file_accession`/`accession`/`file_name` and
+`biosample_id`/`biosample`). The file identifier is matched against peak
+file names with their extension stripped, so it works whether or not
+your metadata file's identifier column includes one.
+
+```bash
+python3 align_peaks.py \
+    --input peaks/*.narrowPeak \
+    --outdir results \
+    --metadata-file metadata.txt
+```
+
+Any file referenced in `overlapping_files` that isn't found in the
+metadata is left out of `biosamples` for that peak and reported as a
+warning at the end of the run.
+
 ## Install
 
 ```bash
@@ -187,6 +210,8 @@ docker run --rm \
 - `--qc-report-only`: compute/write QC metrics but don't exclude anything.
 - `--blacklist-bed`: BED file of regions to drop final unified peaks
   overlapping (e.g. ENCODE blacklist) — see Blacklist filtering above.
+- `--metadata-file`: file mapping file accession -> biosample_id, used to
+  add a `biosamples` column — see Biosample annotation above.
 - `--outdir`: output directory (created if missing).
 - `--window`: fixed window width in bp (default 300).
 - `--genome`: `hg38`, `hg19`, or `mm10` — used only to clip windows at
@@ -196,10 +221,16 @@ docker run --rm \
 
 - `results/unified_peaks.bed` — the final consensus peak set, reflecting
   the QC-filtered file set (unless `--no-qc`/`--qc-report-only`). Columns:
-  `chrom, start, end, unified_id, seed_tier, seed_signalValue, seed_width,
-  seed_file, seed_peak_name, n_peaks_merged`. `seed_tier` is `0` if the
-  window came from a scored peak, `1` if it came from a coordinate-only
-  peak.
+  `chrom, start, end, unified_id, seed_signalValue, seed_width, seed_file,
+  n_peaks_merged, overlapping_files[, biosamples]`.
+  - `seed_file`: the file that seeded this peak (its own summit/window
+    became the unified window), with its extension stripped.
+  - `overlapping_files`: comma-separated, extension-stripped names of
+    every file with a peak that merged into this unified window
+    (includes `seed_file`).
+  - `biosamples`: comma-separated, deduplicated biosample IDs for every
+    file in `overlapping_files`, looked up via `--metadata-file`. Only
+    present if `--metadata-file` was given.
 - `results/mapping/<original_file>.mapped.bed` — one per input file, one row
   per original peak in its original order. Headerless BED4: `chrom, start,
   end, unified_id` — the coordinates of the unified peak that original peak

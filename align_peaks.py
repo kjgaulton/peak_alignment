@@ -83,12 +83,20 @@ the BED file yourself, e.g. the official ENCODE blacklist v2 lists from
 https://github.com/Boyle-Lab/Blacklist/tree/master/lists (see
 blacklist.py for exact download commands).
 
+Biosample annotation
+---------------------
+If --metadata-file is given (a delimited file mapping file accession ->
+biosample_id -- see metadata.py for the exact matching rules), the final
+unified_peaks.bed gets a 'biosamples' column: the deduplicated biosample
+IDs of every assay/file overlapping that peak.
+
 Output
 ------
 - <outdir>/unified_peaks.bed        Final non-overlapping 300bp consensus peaks
-  (with seed/provenance columns). Reflects the QC-filtered file set unless
-  --no-qc or --qc-report-only is given, and excludes any blacklisted peaks
-  if --blacklist-bed was given.
+  (with seed/provenance columns, including overlapping_files and, if
+  --metadata-file is given, biosamples). Reflects the QC-filtered file set
+  unless --no-qc or --qc-report-only is given, and excludes any
+  blacklisted peaks if --blacklist-bed was given.
 - <outdir>/mapping/<file>.mapped.bed  Per input file, one row per original
   peak in its original order: a headerless BED4 of chrom, start, end,
   unified_id -- the coordinates of the unified peak that original peak was
@@ -124,6 +132,7 @@ from intervaltree import IntervalTree
 from chrom_sizes import GENOME_SIZES
 from qc_metrics import compute_metrics, build_summary, build_distribution, flag_low_quality_files
 from blacklist import load_blacklist, filter_unified_peaks
+from metadata import load_metadata
 
 NARROWPEAK_COLS = [
     "chrom", "start", "end", "name", "score", "strand",
@@ -153,6 +162,7 @@ def load_narrowpeak(path, file_index):
     df.columns = NARROWPEAK_COLS
     df["file_index"] = file_index
     df["file_name"] = os.path.basename(path)
+    df["file_stem"] = os.path.splitext(os.path.basename(path))[0]
     df["orig_line_index"] = df.index
     # Absolute summit position. narrowPeak uses -1 when no summit was called;
     # fall back to the interval midpoint in that case.
@@ -164,7 +174,7 @@ def load_narrowpeak(path, file_index):
     df["tier"] = TIER_SCORED
     df["width"] = df["end"] - df["start"]
     df["rank_value"] = df["signalValue"]
-    return df[COMMON_COLS + ["file_index", "file_name", "orig_line_index"]]
+    return df[COMMON_COLS + ["file_index", "file_name", "file_stem", "orig_line_index"]]
 
 
 def load_coord_only(path, file_index):
@@ -184,6 +194,7 @@ def load_coord_only(path, file_index):
 
     df["file_index"] = file_index
     df["file_name"] = os.path.basename(path)
+    df["file_stem"] = os.path.splitext(os.path.basename(path))[0]
     df["orig_line_index"] = df.index
     df["score"] = float("nan")
     df["strand"] = "."
@@ -195,7 +206,7 @@ def load_coord_only(path, file_index):
     df["tier"] = TIER_COORD_ONLY
     df["width"] = df["end"] - df["start"]
     df["rank_value"] = df["width"]
-    return df[COMMON_COLS + ["file_index", "file_name", "orig_line_index"]]
+    return df[COMMON_COLS + ["file_index", "file_name", "file_stem", "orig_line_index"]]
 
 
 def build_peak_pool(scored_files, coord_only_files):
@@ -296,17 +307,23 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
         start, end = int(seed["window_start"]), int(seed["window_end"])
         uid = f"unified_peak_{unified_id}"
         unified_id += 1
+
+        # Every distinct assay (file, extension stripped) with a peak
+        # merged into this unified window, including the seed's own file.
+        overlapping_files = sorted({
+            by_id.loc[oid, "file_stem"] for oid in overlapping_ids
+        })
+
         unified_rows.append({
             "chrom": chrom,
             "start": start,
             "end": end,
             "unified_id": uid,
-            "seed_tier": int(seed["tier"]),
             "seed_signalValue": seed["signalValue"],
             "seed_width": int(seed["width"]),
-            "seed_file": seed["file_name"],
-            "seed_peak_name": seed["name"],
+            "seed_file": seed["file_stem"],
             "n_peaks_merged": len(overlapping_ids),
+            "overlapping_files": ",".join(overlapping_files),
         })
 
         # Remove exactly these intervals (by identity, not by a fresh range
@@ -362,6 +379,31 @@ def write_outputs(peaks_df, unified_df, mapping, outdir):
         )
 
     return unified_path, combined_path
+
+
+def annotate_biosamples(unified_df, metadata_map):
+    """Adds a 'biosamples' column: the deduplicated, comma-separated
+    biosample_id for every file listed in a unified peak's
+    overlapping_files. Returns (annotated_df, sorted_list_of_unmatched_files).
+    """
+    unmatched = set()
+
+    def lookup(files_str):
+        biosamples = []
+        for file_stem in files_str.split(","):
+            if not file_stem:
+                continue
+            biosample = metadata_map.get(file_stem)
+            if biosample is None:
+                unmatched.add(file_stem)
+                continue
+            if biosample not in biosamples:
+                biosamples.append(biosample)
+        return ",".join(sorted(biosamples))
+
+    unified_df = unified_df.copy()
+    unified_df["biosamples"] = unified_df["overlapping_files"].map(lookup)
+    return unified_df, sorted(unmatched)
 
 
 def run_qc(
@@ -437,6 +479,15 @@ def main():
             "dropped, along with any original peaks mapped to it."
         ),
     )
+    parser.add_argument(
+        "--metadata-file", default=None,
+        help=(
+            "Optional delimited file mapping file accession -> biosample_id "
+            "(see metadata.py for the expected/matched column names). If "
+            "given, adds a 'biosamples' column to unified_peaks.bed: the "
+            "deduplicated biosamples of every assay overlapping that peak."
+        ),
+    )
     parser.add_argument("--outdir", required=True, help="Output directory")
     parser.add_argument(
         "--window", type=int, default=300,
@@ -483,16 +534,42 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.blacklist_bed and not os.path.isfile(args.blacklist_bed):
-        sys.exit(
-            f"--blacklist-bed file not found: {args.blacklist_bed}\n\n"
-            f"If you're running in Docker, remember this path is looked up "
-            f"INSIDE the container -- a host path only exists there if you "
-            f"mounted it with -v. Either copy the blacklist file into an "
-            f"already-mounted directory (e.g. alongside your peaks under "
-            f"/data) or add another -v mount for wherever it lives, then "
-            f"point --blacklist-bed at the container-side path."
-        )
+    # Load and validate --blacklist-bed / --metadata-file upfront, before any
+    # expensive computation, so a bad path or a malformed file fails in a
+    # fraction of a second instead of after a full alignment (+QC) pass.
+    blacklist_trees = None
+    if args.blacklist_bed:
+        if not os.path.isfile(args.blacklist_bed):
+            sys.exit(
+                f"--blacklist-bed file not found: {args.blacklist_bed}\n\n"
+                f"If you're running in Docker, remember this path is looked up "
+                f"INSIDE the container -- a host path only exists there if you "
+                f"mounted it with -v. Either copy the blacklist file into an "
+                f"already-mounted directory (e.g. alongside your peaks under "
+                f"/data) or add another -v mount for wherever it lives, then "
+                f"point --blacklist-bed at the container-side path."
+            )
+        try:
+            blacklist_trees = load_blacklist(args.blacklist_bed)
+        except (FileNotFoundError, ValueError, pd.errors.ParserError) as exc:
+            sys.exit(f"Could not load --blacklist-bed {args.blacklist_bed}: {exc}")
+
+    metadata_map = None
+    if args.metadata_file:
+        if not os.path.isfile(args.metadata_file):
+            sys.exit(
+                f"--metadata-file file not found: {args.metadata_file}\n\n"
+                f"If you're running in Docker, remember this path is looked up "
+                f"INSIDE the container -- a host path only exists there if you "
+                f"mounted it with -v. Either copy the metadata file into an "
+                f"already-mounted directory (e.g. alongside your peaks under "
+                f"/data) or add another -v mount for wherever it lives, then "
+                f"point --metadata-file at the container-side path."
+            )
+        try:
+            metadata_map = load_metadata(args.metadata_file)
+        except (FileNotFoundError, ValueError, pd.errors.ParserError) as exc:
+            sys.exit(f"Could not load --metadata-file {args.metadata_file}: {exc}")
 
     def resolve(patterns):
         files = []
@@ -603,12 +680,8 @@ def main():
         else:
             print("\nAll files passed QC thresholds -- nothing excluded.")
 
-    if args.blacklist_bed:
+    if blacklist_trees is not None:
         print(f"\nApplying blacklist filter: {args.blacklist_bed}")
-        try:
-            blacklist_trees = load_blacklist(args.blacklist_bed)
-        except FileNotFoundError as exc:
-            sys.exit(str(exc))
         unified_df, mapping, removed_df = filter_unified_peaks(unified_df, mapping, blacklist_trees)
         peaks_df = peaks_df[peaks_df["global_id"].isin(mapping.keys())].reset_index(drop=True)
         print(f"Removed {len(removed_df)} unified peak(s) overlapping the blacklist.")
@@ -623,6 +696,22 @@ def main():
                 _explain_permission_error(exc, args.outdir)
             print(f"Removed peaks written to: {removed_path}")
         print(f"Unified peaks remaining: {len(unified_df)}")
+        if unified_df.empty:
+            sys.exit(
+                "Every unified peak was removed by --blacklist-bed -- nothing "
+                "left to write. Check that the blacklist file and your peaks "
+                "are on the same genome build, and that it isn't unexpectedly "
+                "broad relative to your peak set."
+            )
+
+    if metadata_map is not None:
+        unified_df, unmatched = annotate_biosamples(unified_df, metadata_map)
+        if unmatched:
+            preview = ", ".join(unmatched[:10]) + ("..." if len(unmatched) > 10 else "")
+            print(
+                f"\nWarning: {len(unmatched)} file(s) referenced in overlapping_files "
+                f"had no match in --metadata-file (left out of biosamples): {preview}"
+            )
 
     try:
         unified_path, combined_path = write_outputs(peaks_df, unified_df, mapping, args.outdir)
