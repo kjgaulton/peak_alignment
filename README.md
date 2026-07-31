@@ -221,8 +221,10 @@ docker run --rm \
 
 - `results/unified_peaks.bed` — the final consensus peak set, reflecting
   the QC-filtered file set (unless `--no-qc`/`--qc-report-only`). Columns:
-  `chrom, start, end, unified_id, seed_signalValue, seed_width, seed_file,
+  `chrom, start, end, unified_id, seed_signalValue, seed_summit, seed_file,
   n_peaks_merged, overlapping_files[, biosamples]`.
+  - `seed_summit`: the genomic position of the seed peak's summit (what
+    the unified window is centered on).
   - `seed_file`: the file that seeded this peak (its own summit/window
     became the unified window), with its extension stripped.
   - `overlapping_files`: comma-separated, extension-stripped names of

@@ -320,7 +320,7 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
             "end": end,
             "unified_id": uid,
             "seed_signalValue": seed["signalValue"],
-            "seed_width": int(seed["width"]),
+            "seed_summit": int(seed["summit"]),
             "seed_file": seed["file_stem"],
             "n_peaks_merged": len(overlapping_ids),
             "overlapping_files": ",".join(overlapping_files),
