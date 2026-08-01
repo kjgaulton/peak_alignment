@@ -343,6 +343,7 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
             "seed_file": seed["file_stem"],
             "n_peaks_merged": len(overlapping_ids),
             "overlapping_files": ",".join(overlapping_files),
+            "n_assays": len(overlapping_files),
         })
 
         # Remove exactly these intervals (by identity, not by a fresh range
@@ -429,11 +430,14 @@ def annotate_biosamples(unified_df, metadata_map):
     return unified_df, sorted(unmatched)
 
 
-def filter_by_biosample_count(unified_df, mapping, min_biosamples):
-    """Drops any unified peak supported by fewer than min_biosamples
-    distinct biosamples. Returns (kept_df, kept_mapping, removed_df),
-    mirroring blacklist.filter_unified_peaks."""
-    is_low = unified_df["n_biosamples"] < min_biosamples
+def filter_by_assay_count(unified_df, mapping, min_assays):
+    """Drops any unified peak supported by fewer than min_assays distinct
+    assays (files), based on the 'n_assays' column -- independent of
+    biosample/metadata annotation, catching e.g. pseudo-replication where
+    a peak only shows up in a single assay run more than once. Returns
+    (kept_df, kept_mapping, removed_df), mirroring
+    blacklist.filter_unified_peaks."""
+    is_low = unified_df["n_assays"] < min_assays
     removed_df = unified_df.loc[is_low].reset_index(drop=True)
     kept_df = unified_df.loc[~is_low].reset_index(drop=True)
 
@@ -538,12 +542,13 @@ def main():
         ),
     )
     parser.add_argument(
-        "--min-biosamples", type=int, default=2,
+        "--min-assays", type=int, default=1,
         help=(
             "Drop any final unified peak supported by fewer than this many "
-            "distinct biosamples (default: 2 -- excludes peaks found in "
-            "only one biosample). Only takes effect if --metadata-file is "
-            "given; ignored otherwise."
+            "distinct assays/files (default: 1 -- no-op, since every "
+            "unified peak has at least one supporting file; raise this to "
+            "e.g. 2 to exclude peaks found in only a single assay). Based "
+            "on the 'n_assays' count, independent of --metadata-file."
         ),
     )
     parser.add_argument("--outdir", required=True, help="Output directory")
@@ -776,32 +781,31 @@ def main():
                 f"had no match in --metadata-file (left out of biosamples): {preview}"
             )
 
-        print(f"\nApplying biosample-count filter: min {args.min_biosamples} biosample(s)")
-        unified_df, mapping, removed_bio_df = filter_by_biosample_count(
-            unified_df, mapping, args.min_biosamples
-        )
-        peaks_df = peaks_df[peaks_df["global_id"].isin(mapping.keys())].reset_index(drop=True)
-        print(
-            f"Removed {len(removed_bio_df)} unified peak(s) with fewer than "
-            f"{args.min_biosamples} biosample(s)."
-        )
-        if len(removed_bio_df):
-            try:
-                os.makedirs(args.outdir, exist_ok=True)
-                removed_bio_path = os.path.join(args.outdir, "low_biosample_count_removed_peaks.bed")
-                removed_bio_df.sort_values(["chrom", "start"]).to_csv(
-                    removed_bio_path, sep="\t", header=True, index=False
-                )
-            except OSError as exc:
-                _explain_write_error(exc, args.outdir)
-            print(f"Removed peaks written to: {removed_bio_path}")
-        print(f"Unified peaks remaining: {len(unified_df)}")
-        if unified_df.empty:
-            sys.exit(
-                "Every unified peak was removed by --min-biosamples -- nothing "
-                "left to write. Lower --min-biosamples or check --metadata-file "
-                "coverage of your input files."
+    print(f"\nApplying assay-count filter: min {args.min_assays} assay(s)")
+    unified_df, mapping, removed_assay_df = filter_by_assay_count(
+        unified_df, mapping, args.min_assays
+    )
+    peaks_df = peaks_df[peaks_df["global_id"].isin(mapping.keys())].reset_index(drop=True)
+    print(
+        f"Removed {len(removed_assay_df)} unified peak(s) found in fewer than "
+        f"{args.min_assays} assay(s)."
+    )
+    if len(removed_assay_df):
+        try:
+            os.makedirs(args.outdir, exist_ok=True)
+            removed_assay_path = os.path.join(args.outdir, "low_assay_count_removed_peaks.bed")
+            removed_assay_df.sort_values(["chrom", "start"]).to_csv(
+                removed_assay_path, sep="\t", header=True, index=False
             )
+        except OSError as exc:
+            _explain_write_error(exc, args.outdir)
+        print(f"Removed peaks written to: {removed_assay_path}")
+    print(f"Unified peaks remaining: {len(unified_df)}")
+    if unified_df.empty:
+        sys.exit(
+            "Every unified peak was removed by --min-assays -- nothing left "
+            "to write. Lower --min-assays."
+        )
 
     try:
         unified_path, combined_path = write_outputs(peaks_df, unified_df, mapping, args.outdir)
