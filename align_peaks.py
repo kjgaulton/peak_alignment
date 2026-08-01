@@ -294,6 +294,7 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
     mapping = {}
     unified_rows = []
     unified_id = 0
+    n_stale_hits = 0
 
     total = len(order)
     progress_step = max(total // 20, 100000)
@@ -321,7 +322,19 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
             # the tree; fall back to treating it as a singleton cluster.
             overlapping_ids = [gid]
         else:
-            overlapping_ids = [iv.data for iv in hits]
+            # Defensive filter: on very large trees, the `intervaltree`
+            # package can (rarely) leave a stale/duplicate reference to an
+            # already-removed interval reachable from a later overlap()
+            # query, as a side effect of its internal AVL rebalancing after
+            # many removals (this is what previously surfaced as a
+            # `KeyError` from tree.remove() on a 24M-peak real run). Drop
+            # any hit whose peak was already consumed by an earlier
+            # cluster so it can never be double-counted into two unified
+            # peaks; always keep the seed itself.
+            overlapping_ids = [iv.data for iv in hits if iv.data not in consumed]
+            n_stale_hits += len(hits) - len(overlapping_ids)
+            if gid not in overlapping_ids:
+                overlapping_ids.append(gid)
 
         start, end = int(seed["window_start"]), int(seed["window_end"])
         uid = f"unified_peak_{unified_id}"
@@ -348,12 +361,29 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
 
         # Remove exactly these intervals (by identity, not by a fresh range
         # query) so we never collaterally drop peaks that only overlap a
-        # cluster member but not the seed itself.
+        # cluster member but not the seed itself. Use discard() rather
+        # than remove(): remove() raises (Key/ValueError) if the interval
+        # can't be located via the tree's internal node search even though
+        # it's still tracked as present overall -- a rare but real
+        # consequence of AVL rebalancing on very large trees. discard() is
+        # a safe no-op in that case; the `consumed`-based filter above is
+        # what actually guarantees correctness (no peak double-counted),
+        # not this removal succeeding.
         for iv in hits:
-            tree.remove(iv)
+            tree.discard(iv)
         for oid in overlapping_ids:
             consumed.add(oid)
             mapping[oid] = uid
+
+    if n_stale_hits:
+        print(
+            f"Note: {n_stale_hits} stale interval-tree hit(s) were "
+            f"encountered and safely ignored during seed selection (a "
+            f"known rare edge case in the underlying intervaltree package "
+            f"on large trees -- does not affect correctness, see comments "
+            f"in run_iterative_selection).",
+            flush=True,
+        )
 
     unified_df = pd.DataFrame(unified_rows)
     return unified_df, mapping

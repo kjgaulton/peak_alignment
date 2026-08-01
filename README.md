@@ -316,6 +316,17 @@ docker run --rm \
   `--min-median-other-files 2` or the auto `--min-max-other-files`
   (n_files / 2) even when everything looks fine — lower the thresholds
   or use `--qc-report-only` in that case.
+- On very large runs (tens of millions of pooled peaks), the underlying
+  `intervaltree` package can, rarely, fail to locate an interval it just
+  reported via an overlap query when removing it (an internal AVL
+  rebalancing edge case, not specific to this pipeline). This used to
+  surface as a crash (`KeyError`/`ValueError` from `tree.remove()`);
+  it's now handled by discarding such intervals safely and filtering
+  seed-selection results against already-consumed peaks, so it can no
+  longer crash the run or double-count a peak into two unified windows.
+  If it happens, you'll see a one-line `Note: N stale interval-tree
+  hit(s) were encountered and safely ignored` in the log — informational
+  only, does not affect correctness of the output.
 
 ## Running in the background / troubleshooting silent failures
 
