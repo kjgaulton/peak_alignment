@@ -83,20 +83,25 @@ the BED file yourself, e.g. the official ENCODE blacklist v2 lists from
 https://github.com/Boyle-Lab/Blacklist/tree/master/lists (see
 blacklist.py for exact download commands).
 
-Biosample annotation
----------------------
+Biosample annotation and filtering
+------------------------------------
 If --metadata-file is given (a delimited file mapping file accession ->
 biosample_id -- see metadata.py for the exact matching rules), the final
-unified_peaks.bed gets a 'biosamples' column: the deduplicated biosample
-IDs of every assay/file overlapping that peak.
+unified_peaks.bed gets 'biosamples'/'n_biosamples' columns: the
+deduplicated biosample IDs of every assay/file overlapping that peak, and
+how many there are. Any unified peak backed by fewer than
+--min-biosamples (default 2) distinct biosamples is then dropped
+entirely -- by default this excludes peaks found in only one biosample.
+This filtering only happens if --metadata-file is given.
 
 Output
 ------
 - <outdir>/unified_peaks.bed        Final non-overlapping 300bp consensus peaks
   (with seed/provenance columns, including overlapping_files and, if
-  --metadata-file is given, biosamples). Reflects the QC-filtered file set
-  unless --no-qc or --qc-report-only is given, and excludes any
-  blacklisted peaks if --blacklist-bed was given.
+  --metadata-file is given, biosamples/n_biosamples). Reflects the
+  QC-filtered file set unless --no-qc or --qc-report-only is given, and
+  excludes any blacklisted peaks if --blacklist-bed was given, and any
+  peaks below --min-biosamples if --metadata-file was given.
 - <outdir>/mapping/<file>.mapped.bed  Per input file, one row per original
   peak in its original order: a headerless BED4 of chrom, start, end,
   unified_id -- the coordinates of the unified peak that original peak was
@@ -382,9 +387,10 @@ def write_outputs(peaks_df, unified_df, mapping, outdir):
 
 
 def annotate_biosamples(unified_df, metadata_map):
-    """Adds a 'biosamples' column: the deduplicated, comma-separated
-    biosample_id for every file listed in a unified peak's
-    overlapping_files. Returns (annotated_df, sorted_list_of_unmatched_files).
+    """Adds 'biosamples' (deduplicated, comma-separated biosample_id for
+    every file listed in a unified peak's overlapping_files) and
+    'n_biosamples' (count of those) columns. Returns (annotated_df,
+    sorted_list_of_unmatched_files).
     """
     unmatched = set()
 
@@ -403,7 +409,23 @@ def annotate_biosamples(unified_df, metadata_map):
 
     unified_df = unified_df.copy()
     unified_df["biosamples"] = unified_df["overlapping_files"].map(lookup)
+    unified_df["n_biosamples"] = unified_df["biosamples"].map(
+        lambda s: len(s.split(",")) if s else 0
+    )
     return unified_df, sorted(unmatched)
+
+
+def filter_by_biosample_count(unified_df, mapping, min_biosamples):
+    """Drops any unified peak supported by fewer than min_biosamples
+    distinct biosamples. Returns (kept_df, kept_mapping, removed_df),
+    mirroring blacklist.filter_unified_peaks."""
+    is_low = unified_df["n_biosamples"] < min_biosamples
+    removed_df = unified_df.loc[is_low].reset_index(drop=True)
+    kept_df = unified_df.loc[~is_low].reset_index(drop=True)
+
+    removed_ids = set(removed_df["unified_id"])
+    kept_mapping = {gid: uid for gid, uid in mapping.items() if uid not in removed_ids}
+    return kept_df, kept_mapping, removed_df
 
 
 def run_qc(
@@ -484,8 +506,18 @@ def main():
         help=(
             "Optional delimited file mapping file accession -> biosample_id "
             "(see metadata.py for the expected/matched column names). If "
-            "given, adds a 'biosamples' column to unified_peaks.bed: the "
-            "deduplicated biosamples of every assay overlapping that peak."
+            "given, adds 'biosamples'/'n_biosamples' columns to "
+            "unified_peaks.bed: the deduplicated biosamples of every assay "
+            "overlapping that peak, and how many there are."
+        ),
+    )
+    parser.add_argument(
+        "--min-biosamples", type=int, default=2,
+        help=(
+            "Drop any final unified peak supported by fewer than this many "
+            "distinct biosamples (default: 2 -- excludes peaks found in "
+            "only one biosample). Only takes effect if --metadata-file is "
+            "given; ignored otherwise."
         ),
     )
     parser.add_argument("--outdir", required=True, help="Output directory")
@@ -711,6 +743,33 @@ def main():
             print(
                 f"\nWarning: {len(unmatched)} file(s) referenced in overlapping_files "
                 f"had no match in --metadata-file (left out of biosamples): {preview}"
+            )
+
+        print(f"\nApplying biosample-count filter: min {args.min_biosamples} biosample(s)")
+        unified_df, mapping, removed_bio_df = filter_by_biosample_count(
+            unified_df, mapping, args.min_biosamples
+        )
+        peaks_df = peaks_df[peaks_df["global_id"].isin(mapping.keys())].reset_index(drop=True)
+        print(
+            f"Removed {len(removed_bio_df)} unified peak(s) with fewer than "
+            f"{args.min_biosamples} biosample(s)."
+        )
+        if len(removed_bio_df):
+            try:
+                os.makedirs(args.outdir, exist_ok=True)
+                removed_bio_path = os.path.join(args.outdir, "low_biosample_count_removed_peaks.bed")
+                removed_bio_df.sort_values(["chrom", "start"]).to_csv(
+                    removed_bio_path, sep="\t", header=True, index=False
+                )
+            except PermissionError as exc:
+                _explain_permission_error(exc, args.outdir)
+            print(f"Removed peaks written to: {removed_bio_path}")
+        print(f"Unified peaks remaining: {len(unified_df)}")
+        if unified_df.empty:
+            sys.exit(
+                "Every unified peak was removed by --min-biosamples -- nothing "
+                "left to write. Lower --min-biosamples or check --metadata-file "
+                "coverage of your input files."
             )
 
     try:

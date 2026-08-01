@@ -94,28 +94,39 @@ python3 align_peaks.py \
     --blacklist-bed hg38-blacklist.v2.bed
 ```
 
-## Biosample annotation
+## Biosample annotation and filtering
 
-If `--metadata-file` is given, `unified_peaks.bed` gets a `biosamples`
-column: the deduplicated biosample IDs of every assay/file overlapping
-that peak. The metadata file is a delimited text file (tab or comma,
-auto-detected) with a header row containing a file-identifier column and
-a biosample column — see `metadata.py` for the exact column names
-matched (e.g. `file_accession`/`accession`/`file_name` and
-`biosample_id`/`biosample`). The file identifier is matched against peak
-file names with their extension stripped, so it works whether or not
-your metadata file's identifier column includes one.
+If `--metadata-file` is given, `unified_peaks.bed` gets `biosamples`/
+`n_biosamples` columns: the deduplicated biosample IDs of every
+assay/file overlapping that peak, and how many there are. The metadata
+file is a delimited text file (tab or comma, auto-detected) with a header
+row containing a file-identifier column and a biosample column — see
+`metadata.py` for the exact column names matched (e.g.
+`file_accession`/`accession`/`file_name` and `biosample_id`/`biosample`).
+The file identifier is matched against peak file names with their
+extension stripped, so it works whether or not your metadata file's
+identifier column includes one.
+
+Once `n_biosamples` is known, any unified peak backed by fewer than
+`--min-biosamples` (default **2**) distinct biosamples is dropped from
+the final set — by default this excludes peaks found in only one
+biosample. This catches pseudo-replication: two *files* overlapping at a
+peak isn't meaningful reproducibility if they're actually the same
+underlying biosample. This filtering only happens if `--metadata-file` is
+given; pass `--min-biosamples 1` to keep everything (no filtering) while
+still getting the annotation columns.
 
 ```bash
 python3 align_peaks.py \
     --input peaks/*.narrowPeak \
     --outdir results \
-    --metadata-file metadata.txt
+    --metadata-file metadata.txt \
+    --min-biosamples 2
 ```
 
 Any file referenced in `overlapping_files` that isn't found in the
-metadata is left out of `biosamples` for that peak and reported as a
-warning at the end of the run.
+metadata is left out of `biosamples`/`n_biosamples` for that peak and
+reported as a warning at the end of the run.
 
 ## Install
 
@@ -211,7 +222,11 @@ docker run --rm \
 - `--blacklist-bed`: BED file of regions to drop final unified peaks
   overlapping (e.g. ENCODE blacklist) — see Blacklist filtering above.
 - `--metadata-file`: file mapping file accession -> biosample_id, used to
-  add a `biosamples` column — see Biosample annotation above.
+  add `biosamples`/`n_biosamples` columns — see Biosample annotation
+  above.
+- `--min-biosamples`: drop unified peaks backed by fewer than this many
+  distinct biosamples, default 2. Only takes effect if `--metadata-file`
+  is given.
 - `--outdir`: output directory (created if missing).
 - `--window`: fixed window width in bp (default 300).
 - `--genome`: `hg38`, `hg19`, or `mm10` — used only to clip windows at
@@ -222,7 +237,7 @@ docker run --rm \
 - `results/unified_peaks.bed` — the final consensus peak set, reflecting
   the QC-filtered file set (unless `--no-qc`/`--qc-report-only`). Columns:
   `chrom, start, end, unified_id, seed_signalValue, seed_summit, seed_file,
-  n_peaks_merged, overlapping_files[, biosamples]`.
+  n_peaks_merged, overlapping_files[, biosamples, n_biosamples]`.
   - `seed_summit`: the genomic position of the seed peak's summit (what
     the unified window is centered on).
   - `seed_file`: the file that seeded this peak (its own summit/window
@@ -230,9 +245,11 @@ docker run --rm \
   - `overlapping_files`: comma-separated, extension-stripped names of
     every file with a peak that merged into this unified window
     (includes `seed_file`).
-  - `biosamples`: comma-separated, deduplicated biosample IDs for every
-    file in `overlapping_files`, looked up via `--metadata-file`. Only
-    present if `--metadata-file` was given.
+  - `biosamples`/`n_biosamples`: comma-separated, deduplicated biosample
+    IDs for every file in `overlapping_files` (and their count), looked
+    up via `--metadata-file`. Only present if `--metadata-file` was
+    given; peaks below `--min-biosamples` have already been dropped by
+    this point.
 - `results/mapping/<original_file>.mapped.bed` — one per input file, one row
   per original peak in its original order. Headerless BED4: `chrom, start,
   end, unified_id` — the coordinates of the unified peak that original peak
@@ -253,6 +270,10 @@ docker run --rm \
 - `results/blacklist_removed_peaks.bed` — unified peaks dropped for
   overlapping `--blacklist-bed` (only written if given, and if at least
   one peak was removed).
+- `results/low_biosample_count_removed_peaks.bed` — unified peaks dropped
+  for having fewer than `--min-biosamples` distinct biosamples (only
+  written if `--metadata-file` was given, and if at least one peak was
+  removed).
 
 ## Notes
 
