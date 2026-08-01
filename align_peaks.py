@@ -130,6 +130,7 @@ import fnmatch
 import glob
 import os
 import sys
+import traceback
 
 import pandas as pd
 from intervaltree import IntervalTree
@@ -251,12 +252,15 @@ def compute_windows(peaks_df, window, genome_sizes):
 
 def build_chrom_trees(peaks_df):
     trees = {}
+    chroms = sorted(peaks_df["chrom"].unique())
+    print(f"Building interval trees for {len(chroms)} chromosome(s)...", flush=True)
     for chrom, sub in peaks_df.groupby("chrom"):
         tree = IntervalTree()
         for row in sub.itertuples():
             if row.window_end > row.window_start:
                 tree[row.window_start:row.window_end] = row.global_id
         trees[chrom] = tree
+        print(f"  {chrom}: {len(sub)} peak(s) indexed", flush=True)
     return trees
 
 
@@ -291,7 +295,17 @@ def run_iterative_selection(peaks_df, window, genome_sizes):
     unified_rows = []
     unified_id = 0
 
-    for gid in order:
+    total = len(order)
+    progress_step = max(total // 20, 100000)
+    print(f"Running iterative seed selection over {total} peak(s)...", flush=True)
+
+    for processed, gid in enumerate(order):
+        if processed and processed % progress_step == 0:
+            print(
+                f"  ...processed {processed}/{total} candidates, "
+                f"{unified_id} unified peak(s) so far",
+                flush=True,
+            )
         if gid in consumed:
             continue
         seed = by_id.loc[gid]
@@ -453,17 +467,29 @@ def run_qc(
     return summary, distribution, auto_excluded, summary_path, dist_path
 
 
-def _explain_permission_error(exc, outdir):
+def _explain_write_error(exc, outdir):
+    """Called from an `except OSError` block around an output write. Gives
+    a targeted message for the two most common real-world causes (NFS
+    permission mismatch, disk full) instead of a bare traceback -- both of
+    which have bitten this pipeline in practice on large remote runs."""
+    if isinstance(exc, PermissionError):
+        sys.exit(
+            f"\nPermissionError writing output: {exc}\n\n"
+            f"This is almost always a Docker + NFS root-squash mismatch, not a "
+            f"bug: the container is writing as root, but '{outdir}' (or a "
+            f"subdirectory already inside it) is on an NFS mount that maps "
+            f"root to an unprivileged user with no write access.\n\n"
+            f"Fix: make sure --outdir already exists and is owned by you, and "
+            f"run the container as your own user/group, e.g.:\n"
+            f"    mkdir -p {outdir}\n"
+            f"    docker run --rm --user $(id -u):$(id -g) -v ... peak-alignment ...\n"
+        )
     sys.exit(
-        f"\nPermissionError writing output: {exc}\n\n"
-        f"This is almost always a Docker + NFS root-squash mismatch, not a "
-        f"bug: the container is writing as root, but '{outdir}' (or a "
-        f"subdirectory already inside it) is on an NFS mount that maps "
-        f"root to an unprivileged user with no write access.\n\n"
-        f"Fix: make sure --outdir already exists and is owned by you, and "
-        f"run the container as your own user/group, e.g.:\n"
-        f"    mkdir -p {outdir}\n"
-        f"    docker run --rm --user $(id -u):$(id -g) -v ... peak-alignment ...\n"
+        f"\nError writing output to {outdir}: {exc}\n\n"
+        f"If this says 'No space left on device', the output disk/volume is "
+        f"full -- check with `df -h {outdir}` and free space or point "
+        f"--outdir somewhere with more room. Otherwise this may indicate an "
+        f"unhealthy mounted volume/NFS share."
     )
 
 
@@ -566,6 +592,11 @@ def main():
     )
     args = parser.parse_args()
 
+    print("=" * 70, flush=True)
+    print("Starting align_peaks.py run", flush=True)
+    print(f"  outdir: {args.outdir}", flush=True)
+    print("=" * 70, flush=True)
+
     # Load and validate --blacklist-bed / --metadata-file upfront, before any
     # expensive computation, so a bad path or a malformed file fails in a
     # fraction of a second instead of after a full alignment (+QC) pass.
@@ -638,14 +669,14 @@ def main():
 
     genome_sizes = GENOME_SIZES[args.genome]
 
-    print(f"Loading {len(input_files)} scored peak file(s)...")
+    print(f"Loading {len(input_files)} scored peak file(s)...", flush=True)
     if coord_files:
-        print(f"Loading {len(coord_files)} coordinate-only peak file(s) (lower-priority tier)...")
+        print(f"Loading {len(coord_files)} coordinate-only peak file(s) (lower-priority tier)...", flush=True)
     peaks_df = build_peak_pool(input_files, coord_files)
-    print(f"Total peaks pooled: {len(peaks_df)}")
+    print(f"Total peaks pooled: {len(peaks_df)}", flush=True)
 
     unified_df, mapping = run_iterative_selection(peaks_df, args.window, genome_sizes)
-    print(f"Unified peaks produced: {len(unified_df)}")
+    print(f"Unified peaks produced: {len(unified_df)}", flush=True)
 
     if not args.no_qc:
         n_files_in_pass = len(input_files) + len(coord_files)
@@ -661,8 +692,8 @@ def main():
                 args.min_pct_overlap_other_file, args.min_median_other_files,
                 min_max_other_files,
             )
-        except PermissionError as exc:
-            _explain_permission_error(exc, args.outdir)
+        except OSError as exc:
+            _explain_write_error(exc, args.outdir)
         print()
         print(summary.to_string(index=False))
         print(f"\nQC summary:      {summary_path}")
@@ -682,8 +713,8 @@ def main():
             try:
                 with open(excluded_path, "w") as fh:
                     fh.write("\n".join(auto_excluded) + "\n")
-            except PermissionError as exc:
-                _explain_permission_error(exc, args.outdir)
+            except OSError as exc:
+                _explain_write_error(exc, args.outdir)
             print(f"Excluded file list: {excluded_path}")
 
             if args.qc_report_only:
@@ -724,8 +755,8 @@ def main():
                 removed_df.sort_values(["chrom", "start"]).to_csv(
                     removed_path, sep="\t", header=True, index=False
                 )
-            except PermissionError as exc:
-                _explain_permission_error(exc, args.outdir)
+            except OSError as exc:
+                _explain_write_error(exc, args.outdir)
             print(f"Removed peaks written to: {removed_path}")
         print(f"Unified peaks remaining: {len(unified_df)}")
         if unified_df.empty:
@@ -761,8 +792,8 @@ def main():
                 removed_bio_df.sort_values(["chrom", "start"]).to_csv(
                     removed_bio_path, sep="\t", header=True, index=False
                 )
-            except PermissionError as exc:
-                _explain_permission_error(exc, args.outdir)
+            except OSError as exc:
+                _explain_write_error(exc, args.outdir)
             print(f"Removed peaks written to: {removed_bio_path}")
         print(f"Unified peaks remaining: {len(unified_df)}")
         if unified_df.empty:
@@ -774,12 +805,26 @@ def main():
 
     try:
         unified_path, combined_path = write_outputs(peaks_df, unified_df, mapping, args.outdir)
-    except PermissionError as exc:
-        _explain_permission_error(exc, args.outdir)
+    except OSError as exc:
+        _explain_write_error(exc, args.outdir)
     print(f"\nUnified peak set:      {unified_path}")
     print(f"Combined mapping:      {combined_path}")
     print(f"Per-file mapped beds:  {os.path.join(args.outdir, 'mapping')}/")
+    print("=" * 70, flush=True)
+    print("Run completed successfully.", flush=True)
+    print("=" * 70, flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception:
+        print("\n" + "=" * 70, file=sys.stderr, flush=True)
+        print("FATAL: align_peaks.py crashed with an unhandled exception.",
+              file=sys.stderr, flush=True)
+        print("=" * 70, file=sys.stderr, flush=True)
+        traceback.print_exc()
+        sys.stderr.flush()
+        sys.exit(1)

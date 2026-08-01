@@ -303,6 +303,53 @@ docker run --rm \
   (n_files / 2) even when everything looks fine — lower the thresholds
   or use `--qc-report-only` in that case.
 
+## Running in the background / troubleshooting silent failures
+
+For large cohorts (100+ files, tens of millions of pooled peaks), a run can
+take long enough that you'll want to launch it in the background over SSH
+and check on it later. A few things make that reliable instead of a run
+that dies with no visible cause:
+
+- **Redirect output to a log file and check the exit code, don't just
+  background it.** `command &` alone loses stdout/stderr and the exit
+  status once you disconnect. Use `nohup` (or `screen`/`tmux`) and always
+  redirect:
+  ```
+  nohup python3 align_peaks.py --input ... --outdir ... > align.log 2>&1 &
+  echo $! > align.pid
+  ```
+  When it's done, check `echo $?` (if run in `screen`/`tmux`) or
+  `tail align.log` — the run now always ends with either
+  `Run completed successfully.` or a `FATAL:` banner with a full Python
+  traceback, so the log unambiguously tells you which happened. A log that
+  just stops mid-line with neither banner means the *process* was killed
+  from outside Python (see OOM note below), not that the script silently
+  gave up.
+- **Progress logging.** The run now prints per-chromosome interval-tree
+  build progress and periodic `...processed N/total candidates` lines
+  during seed selection, so a truncated log still shows roughly how far
+  the run got before it stopped.
+- **Unbuffered output.** `align_peaks.py`'s print statements flush
+  immediately (the Docker image also sets `PYTHONUNBUFFERED=1`), so
+  `tail -f align.log` reflects real progress rather than batches of
+  buffered output appearing all at once.
+- **Out-of-memory kills leave no traceback at all** — the OS SIGKILLs the
+  process before Python gets a chance to run any exception handler, so the
+  log will simply stop without a `FATAL:` banner. If you're running under
+  Docker, `docker inspect <container> --format '{{.State.ExitCode}}'`
+  showing `137` confirms an OOM/SIGKILL. Under SLURM, check `sacct -j
+  <jobid> --format=MaxRSS,State,ExitCode` or the scheduler's own OOM log.
+  The fix is more memory or fewer files per run (e.g. pre-filtering with
+  `qc_peaks.py`), not a script change.
+- **Disk-full and other I/O errors during output writing** are now caught
+  explicitly (previously only permission errors were), so running out of
+  space on `--outdir`'s volume produces a clear
+  `No space left on device`-style message pointing at the offending path
+  instead of a bare crash.
+- If you do hit a `FATAL:` traceback and it's not one of the above, that's
+  a real bug — the full traceback in the log has everything needed to
+  diagnose it, so please share it rather than just the summary line.
+
 ## Standalone QC re-analysis (qc_peaks.py)
 
 `align_peaks.py` computes and applies QC automatically, so you normally

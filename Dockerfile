@@ -1,5 +1,11 @@
 FROM python:3.11-slim
 
+# Ensure print() output is flushed immediately instead of buffered, so logs
+# from long background/remote runs (redirected to a file, or piped through
+# `docker logs`) show progress in real time instead of appearing all at once
+# right before a crash -- or not at all if the process is killed.
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 COPY requirements.txt .
