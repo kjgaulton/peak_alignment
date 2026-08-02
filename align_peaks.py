@@ -572,13 +572,13 @@ def main():
         ),
     )
     parser.add_argument(
-        "--min-assays", type=int, default=1,
+        "--min-assays", type=int, default=2,
         help=(
             "Drop any final unified peak supported by fewer than this many "
-            "distinct assays/files (default: 1 -- no-op, since every "
-            "unified peak has at least one supporting file; raise this to "
-            "e.g. 2 to exclude peaks found in only a single assay). Based "
-            "on the 'n_assays' count, independent of --metadata-file."
+            "distinct assays/files (default: 2 -- excludes peaks found in "
+            "only a single assay). Based on the 'n_assays' count, "
+            "independent of --metadata-file. Pass --min-assays 1 to keep "
+            "everything (n_assays is always >= 1, so 1 is a no-op)."
         ),
     )
     parser.add_argument("--outdir", required=True, help="Output directory")

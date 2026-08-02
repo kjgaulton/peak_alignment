@@ -98,12 +98,12 @@ python3 align_peaks.py \
 
 Every unified peak gets an `n_assays` column: the count of distinct
 assays/files in `overlapping_files` supporting it. Any peak backed by
-fewer than `--min-assays` (default **1** — a no-op, since every unified
-peak has at least one supporting file) distinct assays is dropped from
-the final set and written to `low_assay_count_removed_peaks.bed`. Raise
-it to e.g. `--min-assays 2` to require a peak show up in more than one
-assay before it's trusted. This filter doesn't depend on
-`--metadata-file` — it's based purely on the `overlapping_files` count.
+fewer than `--min-assays` (default **2**) distinct assays is dropped
+from the final set and written to `low_assay_count_removed_peaks.bed`
+— by default this excludes peaks found in only a single assay. This
+filter doesn't depend on `--metadata-file` — it's based purely on the
+`overlapping_files` count. Pass `--min-assays 1` to disable it and keep
+everything (`n_assays` is always >= 1, so 1 is a no-op threshold).
 
 ```bash
 python3 align_peaks.py \
@@ -239,8 +239,8 @@ docker run --rm \
   add `biosamples`/`n_biosamples` columns — see Biosample annotation
   above.
 - `--min-assays`: drop unified peaks found in fewer than this many
-  distinct assays/files, default 1 (no-op). See Assay-count filtering
-  above.
+  distinct assays/files, default 2 (excludes single-assay peaks). See
+  Assay-count filtering above.
 - `--outdir`: output directory (created if missing).
 - `--window`: fixed window width in bp (default 300).
 - `--genome`: `hg38`, `hg19`, or `mm10` — used only to clip windows at
@@ -286,8 +286,8 @@ docker run --rm \
   one peak was removed).
 - `results/low_assay_count_removed_peaks.bed` — unified peaks dropped for
   having fewer than `--min-assays` distinct assays/files (only written if
-  at least one peak was removed; not written at all under the default
-  `--min-assays 1`, since nothing gets removed).
+  at least one peak was removed; not written at all with
+  `--min-assays 1`, since nothing gets removed in that case).
 
 ## Notes
 
