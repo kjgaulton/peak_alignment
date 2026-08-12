@@ -156,6 +156,29 @@ TIER_SCORED = 0
 TIER_COORD_ONLY = 1
 
 
+def _require_numeric(df, col, col_num, path):
+    """Coerces df[col] to numeric, exiting with a clear, targeted error
+    (file, row, offending value) if any value can't be parsed. Used for
+    columns the algorithm actually computes with (coordinates, signal) --
+    a bad value here can't be guessed at, so fail loud and specific rather
+    than let it surface later as an opaque pandas TypeError."""
+    coerced = pd.to_numeric(df[col], errors="coerce")
+    bad = coerced.isna() & df[col].notna()
+    if bad.any():
+        bad_idx = int(df.index[bad][0])
+        bad_value = df.loc[bad_idx, col]
+        sys.exit(
+            f"\n{path}: non-numeric value in column {col_num} ('{col}') at "
+            f"data row {bad_idx + 1}: {bad_value!r}\n\n"
+            f"Column {col_num} ('{col}') must be numeric for every row. "
+            f"This is usually a stray header/comment line missing its "
+            f"leading '#', a truncated row, or the wrong file format for "
+            f"this input. Fix the file, or drop it with "
+            f"--exclude {os.path.basename(path)!r} and re-run."
+        )
+    return coerced
+
+
 def load_narrowpeak(path, file_index):
     df = pd.read_csv(path, sep="\t", header=None, comment="#")
     ncols = df.shape[1]
@@ -166,17 +189,33 @@ def load_narrowpeak(path, file_index):
         )
     df = df.iloc[:, :10]
     df.columns = NARROWPEAK_COLS
+
+    # start/end/signalValue are load-bearing (coordinates and the ranking
+    # key) -- a bad value here can't be guessed, so fail with a specific
+    # file/row/value pointer rather than an opaque TypeError deep in a
+    # comparison. score/pValue/qValue are carried through but never
+    # computed on, so coerce them permissively (bad -> NaN) instead of
+    # failing the whole file over a column nothing here actually uses.
+    for col in ("start", "end", "signalValue"):
+        df[col] = _require_numeric(df, col, NARROWPEAK_COLS.index(col) + 1, path)
+    for col in ("score", "pValue", "qValue"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Absolute summit position. Official narrowPeak uses -1 for "no summit
+    # called"; some peak callers/converters use other non-numeric
+    # placeholders (e.g. "."). Treat any non-numeric or negative value the
+    # same way: no summit, fall back to the interval midpoint below.
+    df["summit_offset"] = pd.to_numeric(df["summit_offset"], errors="coerce")
     df["file_index"] = file_index
     df["file_name"] = os.path.basename(path)
     df["file_stem"] = os.path.splitext(os.path.basename(path))[0]
     df["orig_line_index"] = df.index
-    # Absolute summit position. narrowPeak uses -1 when no summit was called;
-    # fall back to the interval midpoint in that case.
     has_summit = df["summit_offset"] >= 0
     df["summit"] = df["start"] + df["summit_offset"]
     df.loc[~has_summit, "summit"] = (
         (df.loc[~has_summit, "start"] + df.loc[~has_summit, "end"]) // 2
     )
+    df["summit"] = df["summit"].astype("int64")
     df["tier"] = TIER_SCORED
     df["width"] = df["end"] - df["start"]
     df["rank_value"] = df["signalValue"]
@@ -197,6 +236,9 @@ def load_coord_only(path, file_index):
     else:
         df.columns = ["chrom", "start", "end"]
         df["name"] = [f"coord_peak_{i}" for i in df.index]
+
+    df["start"] = _require_numeric(df, "start", 2, path)
+    df["end"] = _require_numeric(df, "end", 3, path)
 
     df["file_index"] = file_index
     df["file_name"] = os.path.basename(path)
