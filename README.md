@@ -293,8 +293,12 @@ docker run --rm \
 
 - `--input` files must be standard 10-column narrowPeak (chrom, start, end,
   name, score, strand, signalValue, pValue, qValue, summit_offset). If a
-  peak has no called summit (`summit_offset == -1`), the interval midpoint
-  is used instead.
+  peak has no called summit (`summit_offset == -1`, or any other
+  non-numeric placeholder like `.`), the interval midpoint is used
+  instead. Lines starting with `#` are always skipped; a header row
+  without a leading `#` is also auto-detected (by checking whether the
+  first row's start/end columns are actually numeric) and skipped, with
+  a one-line note in the log naming the file.
 - `--coord-input` files are plain BED with just chrom, start, end (a 4th
   name column is used if present). They carry no score or summit, so they
   are ranked within their own tier by peak width and centered on the

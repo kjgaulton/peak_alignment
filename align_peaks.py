@@ -156,6 +156,35 @@ TIER_SCORED = 0
 TIER_COORD_ONLY = 1
 
 
+def _maybe_drop_header_row(df, check_cols, path):
+    """Some exported narrowPeak/BED files carry a column-name header row
+    without a leading '#' (which `comment="#"` would otherwise have
+    skipped during read_csv). Detect that case by checking whether the
+    columns that must always be numeric (coordinates) actually are, on
+    the first row only -- if not, treat that row as a header and drop
+    it, rather than letting it fail numeric validation as if it were bad
+    data."""
+    if df.empty:
+        return df
+    first = df.iloc[0]
+
+    def _is_numeric(value):
+        try:
+            float(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    if not all(_is_numeric(first[c]) for c in check_cols):
+        print(
+            f"Detected and skipped a header row (no leading '#') in "
+            f"{os.path.basename(path)}: {list(first)}",
+            flush=True,
+        )
+        df = df.iloc[1:].reset_index(drop=True)
+    return df
+
+
 def _require_numeric(df, col, col_num, path):
     """Coerces df[col] to numeric, exiting with a clear, targeted error
     (file, row, offending value) if any value can't be parsed. Used for
@@ -189,6 +218,7 @@ def load_narrowpeak(path, file_index):
         )
     df = df.iloc[:, :10]
     df.columns = NARROWPEAK_COLS
+    df = _maybe_drop_header_row(df, ["start", "end"], path)
 
     # start/end/signalValue are load-bearing (coordinates and the ranking
     # key) -- a bad value here can't be guessed, so fail with a specific
@@ -236,6 +266,8 @@ def load_coord_only(path, file_index):
     else:
         df.columns = ["chrom", "start", "end"]
         df["name"] = [f"coord_peak_{i}" for i in df.index]
+
+    df = _maybe_drop_header_row(df, ["start", "end"], path)
 
     df["start"] = _require_numeric(df, "start", 2, path)
     df["end"] = _require_numeric(df, "end", 3, path)
