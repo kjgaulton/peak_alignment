@@ -25,10 +25,11 @@ of peaks.
 
 Note: align_peaks.py now computes these same metrics and auto-excludes
 low-quality files itself (see its --min-pct-overlap-other-file /
---min-median-other-files / --min-max-other-files flags, mirrored here).
-Use this script standalone when you want to inspect or re-threshold
-metrics from an existing mapping table without re-running the alignment
-(e.g. an older result set, or trying out different thresholds).
+--min-median-other-files / --min-max-other-files / --min-peaks-per-file /
+--max-peaks-per-file flags, mirrored here). Use this script standalone
+when you want to inspect or re-threshold metrics from an existing mapping
+table without re-running the alignment (e.g. an older result set, or
+trying out different thresholds).
 
 Usage
 -----
@@ -80,6 +81,14 @@ def main():
             "of distinct files in the mapping table."
         ),
     )
+    parser.add_argument(
+        "--min-peaks-per-file", type=int, default=10000,
+        help="Flag a file if it has fewer than this many total peaks (default: 10000). Pass 0 to disable.",
+    )
+    parser.add_argument(
+        "--max-peaks-per-file", type=int, default=350000,
+        help="Flag a file if it has more than this many total peaks (default: 350000).",
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.mapping_tsv):
@@ -118,14 +127,17 @@ def main():
     print(f"\nSummary:     {summary_path}")
     print(f"Distribution: {dist_path}")
 
+    min_peaks_per_file = args.min_peaks_per_file if args.min_peaks_per_file > 0 else None
     flagged = flag_low_quality_files(
         summary, args.min_pct_overlap_other_file, args.min_median_other_files,
-        min_max_other_files,
+        min_max_other_files, min_peaks_per_file, args.max_peaks_per_file,
     )
     print(
         f"\nThresholds: pct_overlap_other_file < {args.min_pct_overlap_other_file}, "
         f"median_other_files < {args.min_median_other_files}, "
-        f"max_other_files < {min_max_other_files:g}"
+        f"max_other_files < {min_max_other_files:g}, "
+        f"n_peaks < {min_peaks_per_file if min_peaks_per_file is not None else '(disabled)'}, "
+        f"n_peaks > {args.max_peaks_per_file}"
     )
     if flagged:
         flagged_path = os.path.join(args.outdir, "flagged_files.txt")

@@ -59,7 +59,7 @@ After the first alignment pass, every original peak is mapped to a unified
 window, which tells us which OTHER input files also placed a peak in that
 same window -- a direct measure of reproducibility. By default this script
 scores every input file on that basis and re-runs the alignment excluding
-any file that falls below any of three thresholds:
+any file that falls below any of five thresholds:
 
   - --min-pct-overlap-other-file (default 75): percent of a file's peaks
     whose unified window is also occupied by a peak from another file.
@@ -69,6 +69,10 @@ any file that falls below any of three thresholds:
     this QC pass): number of other files backing up this file's single
     BEST-supported peak. Catches a file with no peak reproduced across a
     meaningful fraction of the cohort, even if its other metrics pass.
+  - --min-peaks-per-file / --max-peaks-per-file (default 10000 / 350000):
+    a file's raw peak count, independent of overlap with other files.
+    Catches a failed/truncated peak call or a pathologically permissive
+    one, even if the peaks it does have happen to overlap other files.
 
 Use --qc-report-only to compute and write these metrics without excluding
 anything, or --no-qc to skip QC entirely.
@@ -83,25 +87,30 @@ the BED file yourself, e.g. the official ENCODE blacklist v2 lists from
 https://github.com/Boyle-Lab/Blacklist/tree/master/lists (see
 blacklist.py for exact download commands).
 
-Biosample annotation and filtering
-------------------------------------
-If --metadata-file is given (a delimited file mapping file accession ->
-biosample_id -- see metadata.py for the exact matching rules), the final
-unified_peaks.bed gets 'biosamples'/'n_biosamples' columns: the
-deduplicated biosample IDs of every assay/file overlapping that peak, and
-how many there are. Any unified peak backed by fewer than
---min-biosamples (default 2) distinct biosamples is then dropped
-entirely -- by default this excludes peaks found in only one biosample.
-This filtering only happens if --metadata-file is given.
+Assay-count filtering and biosample annotation
+------------------------------------------------
+Every unified peak gets an 'n_assays' column: the count of distinct
+assays/files supporting it (independent of --metadata-file). Any peak
+backed by fewer than --min-assays (default 2) distinct assays is dropped
+entirely -- by default this excludes peaks found in only a single assay.
+
+If --metadata-file is also given (a delimited file mapping file accession
+-> biosample_id -- see metadata.py for the exact matching rules), the
+final unified_peaks.bed additionally gets 'biosamples'/'n_biosamples'
+columns: the deduplicated biosample IDs of every assay/file overlapping
+that peak, and how many there are. This is annotation only and doesn't
+filter anything on its own -- it's there so you can see whether multiple
+*assays* supporting a peak actually come from the same underlying
+biosample.
 
 Output
 ------
 - <outdir>/unified_peaks.bed        Final non-overlapping 300bp consensus peaks
   (with seed/provenance columns, including overlapping_files and, if
   --metadata-file is given, biosamples/n_biosamples). Reflects the
-  QC-filtered file set unless --no-qc or --qc-report-only is given, and
+  QC-filtered file set unless --no-qc or --qc-report-only is given,
   excludes any blacklisted peaks if --blacklist-bed was given, and any
-  peaks below --min-biosamples if --metadata-file was given.
+  peaks below --min-assays.
 - <outdir>/mapping/<file>.mapped.bed  Per input file, one row per original
   peak in its original order: a headerless BED4 of chrom, start, end,
   unified_id -- the coordinates of the unified peak that original peak was
@@ -553,6 +562,7 @@ def filter_by_assay_count(unified_df, mapping, min_assays):
 def run_qc(
     peaks_df, mapping, qc_dir,
     min_pct_overlap_other_file, min_median_other_files, min_max_other_files,
+    min_peaks_per_file=None, max_peaks_per_file=None,
 ):
     """Computes per-file QC metrics from an alignment pass, writes them to
     qc_dir, and returns (summary_df, distribution_df, auto_excluded_files)."""
@@ -570,7 +580,8 @@ def run_qc(
     distribution.to_csv(dist_path, sep="\t", index=False)
 
     auto_excluded = flag_low_quality_files(
-        summary, min_pct_overlap_other_file, min_median_other_files, min_max_other_files
+        summary, min_pct_overlap_other_file, min_median_other_files, min_max_other_files,
+        min_peaks_per_file, max_peaks_per_file,
     )
     return summary, distribution, auto_excluded, summary_path, dist_path
 
@@ -692,6 +703,24 @@ def main():
         ),
     )
     parser.add_argument(
+        "--min-peaks-per-file", type=int, default=10000,
+        help=(
+            "QC threshold: a file is auto-excluded if it has fewer than "
+            "this many total peaks, regardless of how well those peaks "
+            "overlap other files (default: 10000). Pass 0 to disable "
+            "this check."
+        ),
+    )
+    parser.add_argument(
+        "--max-peaks-per-file", type=int, default=350000,
+        help=(
+            "QC threshold: a file is auto-excluded if it has more than "
+            "this many total peaks (default: 350000), catching e.g. a "
+            "pathologically permissive peak call. Pass a very large "
+            "value to effectively disable this check."
+        ),
+    )
+    parser.add_argument(
         "--no-qc", action="store_true",
         help="Skip QC scoring and auto-exclusion entirely; align once on all resolved input files.",
     )
@@ -794,12 +823,13 @@ def main():
             if args.min_max_other_files is not None
             else n_files_in_pass / 2
         )
+        min_peaks_per_file = args.min_peaks_per_file if args.min_peaks_per_file > 0 else None
         qc_dir = os.path.join(args.outdir, "qc")
         try:
             summary, distribution, auto_excluded, summary_path, dist_path = run_qc(
                 peaks_df, mapping, qc_dir,
                 args.min_pct_overlap_other_file, args.min_median_other_files,
-                min_max_other_files,
+                min_max_other_files, min_peaks_per_file, args.max_peaks_per_file,
             )
         except OSError as exc:
             _explain_write_error(exc, args.outdir)
@@ -812,9 +842,11 @@ def main():
             print(
                 f"\n{len(auto_excluded)} file(s) failed QC thresholds "
                 f"(pct_overlap_other_file < {args.min_pct_overlap_other_file}, "
-                f"median_other_files < {args.min_median_other_files}, or "
+                f"median_other_files < {args.min_median_other_files}, "
                 f"max_other_files < {min_max_other_files:g} "
-                f"[{'explicit' if args.min_max_other_files is not None else 'auto: half of ' + str(n_files_in_pass) + ' files'}]):"
+                f"[{'explicit' if args.min_max_other_files is not None else 'auto: half of ' + str(n_files_in_pass) + ' files'}], "
+                f"n_peaks < {min_peaks_per_file if min_peaks_per_file is not None else '(disabled)'}, "
+                f"or n_peaks > {args.max_peaks_per_file}):"
             )
             for f in auto_excluded:
                 print(f"  {f}")
@@ -838,7 +870,8 @@ def main():
                 if not remaining_input:
                     sys.exit(
                         "All --input files failed the QC thresholds -- nothing left to "
-                        "align. Loosen --min-pct-overlap-other-file/--min-median-other-files "
+                        "align. Loosen --min-pct-overlap-other-file/--min-median-other-files/"
+                        "--min-max-other-files/--min-peaks-per-file/--max-peaks-per-file, "
                         "or rerun with --qc-report-only."
                     )
                 print(

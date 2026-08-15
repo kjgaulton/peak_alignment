@@ -68,21 +68,35 @@ def build_distribution(df):
 
 
 def flag_low_quality_files(
-    summary, min_pct_overlap_other_file, min_median_other_files, min_max_other_files
+    summary, min_pct_overlap_other_file, min_median_other_files, min_max_other_files,
+    min_peaks_per_file=None, max_peaks_per_file=None,
 ):
-    """Returns the list of file_names in `summary` that fail any of three
+    """Returns the list of file_names in `summary` that fail any of five
     thresholds: pct_overlap_other_file below min_pct_overlap_other_file,
-    median_other_files below min_median_other_files, or max_other_files
-    below min_max_other_files.
+    median_other_files below min_median_other_files, max_other_files below
+    min_max_other_files, n_peaks below min_peaks_per_file, or n_peaks above
+    max_peaks_per_file.
 
     max_other_files is the best-supported peak a file has -- i.e. even the
     single peak from this file backed up by the most other files. Failing
     this threshold means the file doesn't have even one peak reproduced
     across a meaningful fraction of the cohort.
+
+    min_peaks_per_file/max_peaks_per_file flag files with implausibly few
+    or many called peaks (e.g. a failed/truncated peak call, or a file
+    with a pathologically permissive threshold) independent of how well
+    those peaks overlap other files -- a file can look reproducible by the
+    other three metrics and still be junk if it only has a handful of
+    peaks, or so many that it's clearly over-called. Pass None for either
+    to skip that check.
     """
     fails = (
         (summary["pct_overlap_other_file"] < min_pct_overlap_other_file)
         | (summary["median_other_files"] < min_median_other_files)
         | (summary["max_other_files"] < min_max_other_files)
     )
+    if min_peaks_per_file is not None:
+        fails = fails | (summary["n_peaks"] < min_peaks_per_file)
+    if max_peaks_per_file is not None:
+        fails = fails | (summary["n_peaks"] > max_peaks_per_file)
     return summary.loc[fails, "file_name"].tolist()

@@ -52,7 +52,7 @@ After that first alignment pass, every original peak is mapped to a
 unified window, which tells us which *other* input files also placed a
 peak in that same window — a direct measure of reproducibility.
 `align_peaks.py` scores every input file on that basis by default and
-re-runs the alignment excluding any file that falls below any of three
+re-runs the alignment excluding any file that falls below any of five
 thresholds:
 
 - **pct_overlap_other_file** (`--min-pct-overlap-other-file`, default
@@ -68,8 +68,14 @@ thresholds:
   peaks are all consistently backed by exactly 2 other files will pass
   `median_other_files` but, in a 6-file cohort, still gets excluded here
   since 2 is short of the default bar of 3.
+- **n_peaks** (`--min-peaks-per-file`/`--max-peaks-per-file`, default
+  **10000**/**350000**) — a file's raw total peak count, independent of
+  how well those peaks overlap anything else. Catches a failed/truncated
+  peak call (too few) or a pathologically permissive one (too many),
+  even if the peaks it does have happen to overlap other files just
+  fine. Pass `--min-peaks-per-file 0` to disable the lower bound.
 
-A file is excluded if it fails *any* of the three thresholds. Use
+A file is excluded if it fails *any* of the five thresholds. Use
 `--qc-report-only` to compute and write the metrics without excluding
 anything, or `--no-qc` to skip QC scoring entirely and just align once on
 all resolved input files.
@@ -231,6 +237,8 @@ docker run --rm \
 - `--min-median-other-files`: QC threshold, default 2 (see above).
 - `--min-max-other-files`: QC threshold, default half the number of files
   entering the QC pass (see above).
+- `--min-peaks-per-file`/`--max-peaks-per-file`: QC thresholds on a file's
+  raw peak count, default 10000/350000 (see above).
 - `--no-qc`: skip QC scoring and auto-exclusion entirely.
 - `--qc-report-only`: compute/write QC metrics but don't exclude anything.
 - `--blacklist-bed`: BED file of regions to drop final unified peaks
@@ -393,10 +401,12 @@ python3 qc_peaks.py \
     --outdir results/qc_manual \
     --min-pct-overlap-other-file 75 \
     --min-median-other-files 2 \
-    --min-max-other-files 3
+    --min-max-other-files 3 \
+    --min-peaks-per-file 10000 \
+    --max-peaks-per-file 350000
 ```
 
-Uses the same three thresholds and defaults as `align_peaks.py`
+Uses the same five thresholds and defaults as `align_peaks.py`
 (`--min-max-other-files` auto-computes as half the number of distinct
 files in the mapping table if omitted). Writes the same
 `file_quality_summary.tsv` / `file_overlap_distribution.tsv`, plus a
